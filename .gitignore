@@ -62,3 +62,5 @@ desktop.ini
 # Файлы расписания
 files/
 schedules/
+
+.env.example
