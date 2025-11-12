@@ -1,3 +1,5 @@
+
+
 import psycopg2
 from datetime import datetime, timedelta
 import random
@@ -103,3 +105,43 @@ def generate_test_schedule():
     finally:
         cursor.close()
         conn.close()
+
+
+def clear_schedule():
+    """Очистка таблицы расписания"""
+    conn = psycopg2.connect(**DB_CONFIG)
+    cursor = conn.cursor()
+    
+    try:
+        print("Очистка существующего расписания...")
+        cursor.execute("DELETE FROM schedule")
+        conn.commit()
+        print("✅ Расписание очищено")
+    except Exception as e:
+        conn.rollback()
+        print(f"❌ Ошибка при очистке расписания: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+if __name__ == '__main__':
+    print("=" * 60)
+    print("ГЕНЕРАТОР ТЕСТОВОГО РАСПИСАНИЯ")
+    print("=" * 60)
+    print()
+    
+    choice = input("1. Сгенерировать новое расписание\n"
+                   "2. Очистить расписание и сгенерировать новое\n"
+                   "3. Только очистить расписание\n"
+                   "Выберите действие (1-3): ")
+    
+    if choice == '1':
+        generate_test_schedule()
+    elif choice == '2':
+        clear_schedule()
+        generate_test_schedule()
+    elif choice == '3':
+        clear_schedule()
+    else:
+        print("Некорректный выбор")
