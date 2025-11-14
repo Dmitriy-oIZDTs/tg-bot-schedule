@@ -356,6 +356,42 @@ async def process_settings(callback: types.CallbackQuery):
     await callback.answer()
 
 
+# ============== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==============
+
+def format_schedule(schedule, group_number):
+    """Форматирование расписания для вывода"""
+    if not schedule:
+        return "Расписания нет"
+    
+    date = schedule[0]['lesson_date']
+    date_formatted = date.strftime('%d.%m.%Y, %A')
+    
+    text = f"📅 <b>Расписание группы {group_number}</b>\n"
+    text += f"📆 <b>{date_formatted}</b>\n\n"
+    
+    for lesson in schedule:
+        text += f"🕐 <b>{lesson['lesson_number']} пара ({lesson['start_time']} - {lesson['end_time']})</b>\n"
+        text += f"📚 {lesson['subject_name']}"
+        
+        if lesson['subject_type']:
+            text += f" ({lesson['subject_type']})"
+        
+        text += "\n"
+        
+        if lesson['teacher_fio']:
+            text += f"👨‍🏫 {lesson['teacher_fio']}\n"
+        
+        if lesson['building_name'] and lesson['room_number']:
+            text += f"🏢 {lesson['building_name']}, ауд. {lesson['room_number']}\n"
+        
+        if lesson['notes']:
+            text += f"📝 {lesson['notes']}\n"
+        
+        text += "\n"
+    
+    return text
+
+
 # ============== ОБРАБОТКА ОШИБОК ==============
 
 @dp.errors()
