@@ -183,6 +183,71 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
         await message.answer("Действие отменено.")
 
 
+# ============== РЕГИСТРАЦИЯ ==============
+
+@dp.message(RegistrationStates.waiting_for_fio)
+async def process_fio(message: types.Message, state: FSMContext):
+    """Обработка ввода ФИО"""
+    fio = message.text.strip()
+    
+    if len(fio.split()) < 2:
+        await message.answer("❌ Пожалуйста, введите ФИО полностью (минимум имя и фамилия):")
+        return
+    
+    await state.update_data(fio=fio)
+    
+    # Получаем список групп
+    groups = db.get_all_groups()
+    
+    groups_text = "\n".join([f"• {g['group_number']} ({g['faculty_name']})" for g in groups])
+    
+    await message.answer(
+        f"Спасибо, {fio}!\n\n"
+        f"Теперь выберите вашу группу из списка:\n\n{groups_text}\n\n"
+        f"Введите номер группы:"
+    )
+    await state.set_state(RegistrationStates.waiting_for_group)
+
+
+@dp.message(RegistrationStates.waiting_for_group)
+async def process_group(message: types.Message, state: FSMContext):
+    """Обработка выбора группы"""
+    group_number = message.text.strip().upper()
+    
+    # Проверяем существование группы
+    groups = db.get_all_groups()
+    group = next((g for g in groups if g['group_number'] == group_number), None)
+    
+    if not group:
+        await message.answer(
+            "❌ Группа не найдена. Пожалуйста, выберите группу из списка выше или введите корректный номер:"
+        )
+        return
+    
+    # Получаем данные из состояния
+    data = await state.get_data()
+    fio = data['fio']
+    
+    # Создаем пользователя
+    telegram_id = message.from_user.id
+    username = message.from_user.username
+    
+    user = db.create_user(telegram_id, username, fio, role='user', group_id=group['id'])
+    
+    await state.clear()
+    
+    await message.answer(
+        f"✅ Регистрация завершена!\n\n"
+        f"👤 ФИО: {fio}\n"
+        f"🎓 Группа: {group_number}\n"
+        f"🏛 Факультет: {group['faculty_name']}\n\n"
+        f"Теперь вы можете пользоваться всеми функциями бота.",
+        reply_markup=get_main_keyboard('user')
+    )
+    
+    db.log_user_action(user['id'], 'registration', f'Пользователь зарегистрирован: {fio}, {group_number}')
+
+
 # ============== ОБРАБОТКА ОШИБОК ==============
 
 @dp.errors()
