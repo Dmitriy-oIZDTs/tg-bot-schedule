@@ -102,6 +102,87 @@ def get_settings_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+# ============== КОМАНДЫ ==============
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    """Обработка команды /start"""
+    telegram_id = message.from_user.id
+    user = db.get_user_by_telegram_id(telegram_id)
+    
+    if user:
+        # Пользователь уже зарегистрирован
+        await message.answer(
+            f"С возвращением, {user['fio']}!\n"
+            f"Ваша группа: {user['group_number'] or 'не указана'}\n\n"
+            f"Выберите действие:",
+            reply_markup=get_main_keyboard(user['role'])
+        )
+        db.log_user_action(user['id'], 'start_command', 'Пользователь вернулся в бота')
+    else:
+        # Новый пользователь - начинаем регистрацию
+        await message.answer(
+            "👋 Добро пожаловать в бот расписания!\n\n"
+            "Для начала работы необходимо зарегистрироваться.\n"
+            "Пожалуйста, введите ваше ФИО (полностью):"
+        )
+        await state.set_state(RegistrationStates.waiting_for_fio)
+
+
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    """Обработка команды /help"""
+    help_text = """
+📖 <b>Справка по боту</b>
+
+<b>Основные команды:</b>
+/start - Начать работу с ботом
+/help - Показать эту справку
+/schedule - Получить расписание
+/settings - Открыть настройки
+/cancel - Отменить текущее действие
+
+<b>Возможности бота:</b>
+• Просмотр расписания по группе
+• Поиск расписания на конкретную дату
+• Просмотр расписания преподавателя
+• Просмотр занятости кабинетов
+• Настройка уведомлений
+• Экспорт расписания в файл
+
+<b>Автор:</b> [Ваше ФИО]
+<b>Группа:</b> [Ваша группа]
+
+По всем вопросам обращайтесь к администратору.
+"""
+    await message.answer(help_text, parse_mode='HTML')
+    
+    user = db.get_user_by_telegram_id(message.from_user.id)
+    if user:
+        db.log_user_action(user['id'], 'help_command', 'Пользователь запросил справку')
+
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    """Отмена текущего действия"""
+    current_state = await state.get_state()
+    
+    if current_state is None:
+        await message.answer("Нечего отменять.")
+        return
+    
+    await state.clear()
+    user = db.get_user_by_telegram_id(message.from_user.id)
+    
+    if user:
+        await message.answer(
+            "Действие отменено.",
+            reply_markup=get_main_keyboard(user['role'])
+        )
+    else:
+        await message.answer("Действие отменено.")
+
+
 # ============== ОБРАБОТКА ОШИБОК ==============
 
 @dp.errors()
