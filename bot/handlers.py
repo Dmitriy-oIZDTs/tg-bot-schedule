@@ -248,6 +248,76 @@ async def process_group(message: types.Message, state: FSMContext):
     db.log_user_action(user['id'], 'registration', f'Пользователь зарегистрирован: {fio}, {group_number}')
 
 
+# ============== РАСПИСАНИЕ ==============
+
+@dp.message(F.text == "📅 Мое расписание")
+async def show_my_schedule(message: types.Message):
+    """Показать расписание пользователя на сегодня"""
+    user = db.get_user_by_telegram_id(message.from_user.id)
+    
+    if not user:
+        await message.answer("❌ Вы не зарегистрированы. Используйте /start для регистрации.")
+        return
+    
+    if not user['group_number']:
+        await message.answer("❌ У вас не указана группа. Обратитесь к администратору.")
+        return
+    
+    today = datetime.now().strftime('%Y-%m-%d')
+    schedule = db.get_schedule_by_group(user['group_number'], today)
+    
+    if not schedule:
+        await message.answer(
+            f"📅 На сегодня ({datetime.now().strftime('%d.%m.%Y')}) расписания нет.\n\n"
+            f"Возможно, сегодня выходной день или расписание еще не добавлено."
+        )
+    else:
+        schedule_text = format_schedule(schedule, user['group_number'])
+        await message.answer(schedule_text, parse_mode='HTML')
+    
+    db.log_user_action(user['id'], 'view_schedule', f'Просмотр расписания на {today}')
+
+
+@dp.message(F.text == "📋 Расписание на дату")
+async def schedule_by_date(message: types.Message):
+    """Выбор даты для просмотра расписания"""
+    user = db.get_user_by_telegram_id(message.from_user.id)
+    
+    if not user:
+        await message.answer("❌ Вы не зарегистрированы. Используйте /start для регистрации.")
+        return
+    
+    await message.answer(
+        "📅 Выберите дату для просмотра расписания:",
+        reply_markup=get_date_keyboard()
+    )
+
+
+@dp.callback_query(F.data.startswith("date_"))
+async def process_date_selection(callback: types.CallbackQuery):
+    """Обработка выбора даты"""
+    date_str = callback.data.split("_")[1]
+    user = db.get_user_by_telegram_id(callback.from_user.id)
+    
+    if not user or not user['group_number']:
+        await callback.answer("❌ Ошибка: группа не указана", show_alert=True)
+        return
+    
+    schedule = db.get_schedule_by_group(user['group_number'], date_str)
+    
+    if not schedule:
+        date_formatted = datetime.strptime(date_str, '%Y-%m-%d').strftime('%d.%m.%Y')
+        await callback.message.edit_text(
+            f"📅 На {date_formatted} расписания нет.\n\n"
+            f"Возможно, это выходной день или расписание еще не добавлено."
+        )
+    else:
+        schedule_text = format_schedule(schedule, user['group_number'])
+        await callback.message.edit_text(schedule_text, parse_mode='HTML')
+    
+    db.log_user_action(user['id'], 'view_schedule_date', f'Просмотр расписания на {date_str}')
+    await callback.answer()
+
 # ============== ОБРАБОТКА ОШИБОК ==============
 
 @dp.errors()
