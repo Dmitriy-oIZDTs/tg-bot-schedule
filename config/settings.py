@@ -14,3 +14,10 @@ DB_CONFIG = {
     'host': os.getenv('DB_HOST', 'localhost'),
     'port': os.getenv('DB_PORT', '5432')
 }
+
+# Уровни доступа пользователей
+USER_ROLES = {
+    'developer': 1,
+    'admin': 2,
+    'user': 3
+}
