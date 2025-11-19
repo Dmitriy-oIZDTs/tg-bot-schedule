@@ -214,13 +214,17 @@ async def process_group(message: types.Message, state: FSMContext):
     """Обработка выбора группы"""
     group_number = message.text.strip().upper()
     
-    # Проверяем существование группы
+    # Получаем все группы
     groups = db.get_all_groups()
-    group = next((g for g in groups if g['group_number'] == group_number), None)
+    group = next((g for g in groups if g['group_number'].upper() == group_number), None)
     
     if not group:
+        # Показываем список снова
+        groups_text = "\n".join([f"• {g['group_number']}" for g in groups])
         await message.answer(
-            "❌ Группа не найдена. Пожалуйста, выберите группу из списка выше или введите корректный номер:"
+            f"❌ Группа '{group_number}' не найдена.\n\n"
+            f"Доступные группы:\n{groups_text}\n\n"
+            f"Введите точное название группы:"
         )
         return
     
@@ -395,7 +399,7 @@ def format_schedule(schedule, group_number):
 # ============== ОБРАБОТКА ОШИБОК ==============
 
 @dp.errors()
-async def error_handler(event, exception):
+async def error_handler(update: types.Update, exception: Exception):
     """Глобальный обработчик ошибок"""
     logger.error(f"Ошибка: {exception}", exc_info=True)
     return True

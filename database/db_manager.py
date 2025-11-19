@@ -106,20 +106,44 @@ class DatabaseManager:
     
     def create_user(self, telegram_id, username, fio, role='user', group_id=None):
         """Создание нового пользователя"""
-        query = """
-            INSERT INTO users (telegram_id, username, fio, role, group_id)
-            VALUES (%s, %s, %s, %s, %s)
-            RETURNING id
-        """
-        result = self.execute_query(query, (telegram_id, username, fio, role, group_id), fetch=True)
+        conn = self.connect()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Создание настроек для пользователя
-        if result:
-            user_id = result[0]['id']
-            settings_query = "INSERT INTO user_settings (user_id) VALUES (%s)"
-            self.execute_query(settings_query, (user_id,))
+        try:
+            # Создаем пользователя
+            query = """
+                INSERT INTO users (telegram_id, username, fio, role, group_id)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+            """
+            cursor.execute(query, (telegram_id, username, fio, role, group_id))
+            result = cursor.fetchone()
+            user_id = result['id']
             
-        return result[0] if result else None
+            # Создаем настройки
+            settings_query = "INSERT INTO user_settings (user_id) VALUES (%s)"
+            cursor.execute(settings_query, (user_id,))
+            
+            conn.commit()
+            
+            # Получаем полного пользователя
+            cursor.execute("""
+                SELECT u.*, sg.group_number, f.name as faculty_name
+                FROM users u
+                LEFT JOIN student_groups sg ON u.group_id = sg.id
+                LEFT JOIN faculties f ON sg.faculty_id = f.id
+                WHERE u.id = %s
+            """, (user_id,))
+            
+            return cursor.fetchone()
+            
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Ошибка создания пользователя: {e}")
+            raise
+        finally:
+            cursor.close()
+            self.disconnect()
     
     def log_user_action(self, user_id, action_type, action_details=None):
         """Логирование действий пользователя"""
