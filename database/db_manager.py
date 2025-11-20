@@ -145,6 +145,15 @@ class DatabaseManager:
             cursor.close()
             self.disconnect()
     
+    def update_user_group(self, user_id, group_id):
+        """Обновление группы пользователя"""
+        query = """
+            UPDATE users 
+            SET group_id = %s, last_active = CURRENT_TIMESTAMP
+            WHERE id = %s
+        """
+        self.execute_query(query, (group_id, user_id))
+
     def log_user_action(self, user_id, action_type, action_details=None):
         """Логирование действий пользователя"""
         query = """
