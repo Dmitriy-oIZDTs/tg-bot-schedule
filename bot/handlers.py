@@ -600,6 +600,39 @@ async def process_room_search(message: types.Message, state: FSMContext):
         )
 
 
+# ============== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==============
+
+def format_schedule_day(schedule, group_number, date):
+    """Форматирование расписания на день"""
+    if not schedule:
+        return f"📅 Расписание группы {group_number}\nНа этот день занятий нет"
+    
+    text = f"📅 <b>Расписание группы {group_number}</b>\n"
+    text += f"📆 <b>{date.strftime('%d.%m.%Y (%A)')}</b>\n\n"
+    
+    for lesson in schedule:
+        text += f"🕐 <b>Пара № {lesson['lesson_number']} ({lesson['start_time']} – {lesson['end_time']})</b>\n"
+        text += f"📚 {lesson['subject_name']}"
+        
+        if lesson['subject_type']:
+            text += f" ({lesson['subject_type']})"
+        
+        text += "\n"
+        
+        if lesson['teacher_fio']:
+            text += f"👨‍🏫 Преподаватель: {lesson['teacher_fio']}\n"
+        
+        if lesson['building_name'] and lesson['room_number']:
+            text += f"🏢 Аудитория: {lesson['room_number']} ({lesson['building_name']})\n"
+        
+        if lesson['notes']:
+            text += f"📝 {lesson['notes']}\n"
+        
+        text += "\n"
+    
+    return text
+
+
 # ============== ОБРАБОТКА ОШИБОК ==============
 
 @dp.errors()
