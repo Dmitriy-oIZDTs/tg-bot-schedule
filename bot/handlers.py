@@ -243,75 +243,193 @@ async def show_my_schedule(message: types.Message):
             parse_mode='HTML'
         )
 
-# ============== РАСПИСАНИЕ ==============
+# ============== ОБРАБОТКА CALLBACK ==============
 
-@dp.message(F.text == "📅 Мое расписание")
-async def show_my_schedule(message: types.Message):
-    """Показать расписание пользователя на сегодня"""
-    user = db.get_user_by_telegram_id(message.from_user.id)
-    
-    if not user:
-        await message.answer("❌ Вы не зарегистрированы. Используйте /start для регистрации.")
-        return
-    
-    if not user['group_number']:
-        await message.answer("❌ У вас не указана группа. Обратитесь к администратору.")
-        return
-    
-    today = datetime.now().strftime('%Y-%m-%d')
-    schedule = db.get_schedule_by_group(user['group_number'], today)
-    
-    if not schedule:
-        await message.answer(
-            f"📅 На сегодня ({datetime.now().strftime('%d.%m.%Y')}) расписания нет.\n\n"
-            f"Возможно, сегодня выходной день или расписание еще не добавлено."
-        )
-    else:
-        schedule_text = format_schedule(schedule, user['group_number'])
-        await message.answer(schedule_text, parse_mode='HTML')
-    
-    db.log_user_action(user['id'], 'view_schedule', f'Просмотр расписания на {today}')
-
-
-@dp.message(F.text == "📋 Расписание на дату")
-async def schedule_by_date(message: types.Message):
-    """Выбор даты для просмотра расписания"""
-    user = db.get_user_by_telegram_id(message.from_user.id)
-    
-    if not user:
-        await message.answer("❌ Вы не зарегистрированы. Используйте /start для регистрации.")
-        return
-    
-    await message.answer(
-        "📅 Выберите дату для просмотра расписания:",
-        reply_markup=get_date_keyboard()
-    )
-
-
-@dp.callback_query(F.data.startswith("date_"))
-async def process_date_selection(callback: types.CallbackQuery):
-    """Обработка выбора даты"""
-    date_str = callback.data.split("_")[1]
+@dp.callback_query(F.data.startswith("day_"))
+async def process_day_selection(callback: types.CallbackQuery):
+    """Обработка выбора дня недели"""
     user = db.get_user_by_telegram_id(callback.from_user.id)
     
     if not user or not user['group_number']:
-        await callback.answer("❌ Ошибка: группа не указана", show_alert=True)
+        await callback.answer("❌ Группа не выбрана", show_alert=True)
         return
     
-    schedule = db.get_schedule_by_group(user['group_number'], date_str)
+    # Определяем день недели
+    day_map = {'ПН': 0, 'ВТ': 1, 'СР': 2, 'ЧТ': 3, 'ПТ': 4, 'СБ': 5}
+    day_abbr = callback.data.split('_')[1]
+    target_weekday = day_map[day_abbr]
     
-    if not schedule:
-        date_formatted = datetime.strptime(date_str, '%Y-%m-%d').strftime('%d.%m.%Y')
-        await callback.message.edit_text(
-            f"📅 На {date_formatted} расписания нет.\n\n"
-            f"Возможно, это выходной день или расписание еще не добавлено."
-        )
+    # Находим ближайший такой день
+    today = datetime.now()
+    days_ahead = target_weekday - today.weekday()
+    if days_ahead < 0:
+        days_ahead += 7
+    
+    target_date = today + timedelta(days=days_ahead)
+    
+    # Получаем расписание
+    schedule = db.get_schedule_by_group(user['group_number'], target_date.strftime('%Y-%m-%d'))
+    
+    if schedule:
+        schedule_text = format_schedule_day(schedule, user['group_number'], target_date)
     else:
-        schedule_text = format_schedule(schedule, user['group_number'])
-        await callback.message.edit_text(schedule_text, parse_mode='HTML')
+        schedule_text = (
+            f"📅 Расписание группы {user['group_number']}\n"
+            f"📆 {target_date.strftime('%d.%m.%Y (%A)')}\n\n"
+            f"На этот день занятий нет 🎉"
+        )
     
-    db.log_user_action(user['id'], 'view_schedule_date', f'Просмотр расписания на {date_str}')
+    await callback.message.edit_text(
+        schedule_text,
+        reply_markup=get_days_keyboard(),
+        parse_mode='HTML'
+    )
     await callback.answer()
+
+
+@dp.callback_query(F.data == "week_current")
+async def show_week_schedule(callback: types.CallbackQuery):
+    """Показать расписание на всю текущую неделю"""
+    user = db.get_user_by_telegram_id(callback.from_user.id)
+    
+    if not user or not user['group_number']:
+        await callback.answer("❌ Группа не выбрана", show_alert=True)
+        return
+    
+    # Получаем понедельник текущей недели
+    today = datetime.now()
+    monday = today - timedelta(days=today.weekday())
+    
+    week_schedule_text = f"📅 <b>Расписание группы {user['group_number']}</b>\n"
+    week_schedule_text += f"📆 Неделя с {monday.strftime('%d.%m.%Y')}\n\n"
+    
+    # Получаем расписание на всю неделю
+    for i in range(6):  # ПН-СБ
+        day = monday + timedelta(days=i)
+        schedule = db.get_schedule_by_group(user['group_number'], day.strftime('%Y-%m-%d'))
+        
+        day_name = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'][i]
+        week_schedule_text += f"<b>{day_name} ({day.strftime('%d.%m')})</b>\n"
+        
+        if schedule:
+            for lesson in schedule:
+                week_schedule_text += (
+                    f"  🕐 {lesson['lesson_number']} пара ({lesson['start_time']}-{lesson['end_time']})\n"
+                    f"  📚 {lesson['subject_name']}\n"
+                )
+                if lesson['teacher_fio']:
+                    week_schedule_text += f"  👨‍🏫 {lesson['teacher_fio']}\n"
+                if lesson['room_number']:
+                    week_schedule_text += f"  🏢 {lesson['building_name']}, ауд. {lesson['room_number']}\n"
+        else:
+            week_schedule_text += "  Занятий нет\n"
+        
+        week_schedule_text += "\n"
+    
+    await callback.message.edit_text(
+        week_schedule_text,
+        reply_markup=get_days_keyboard(),
+        parse_mode='HTML'
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "select_week")
+async def show_week_selector(callback: types.CallbackQuery):
+    """Показать выбор недели"""
+    await callback.message.edit_text(
+        "🔢 <b>Выберите номер недели</b>\n\n"
+        "Отсчет идет с 1 сентября.\n"
+        "✅ - текущая неделя",
+        reply_markup=get_week_selector_keyboard(),
+        parse_mode='HTML'
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("week_"))
+async def show_week_by_number(callback: types.CallbackQuery):
+    """Показать расписание по номеру недели"""
+    user = db.get_user_by_telegram_id(callback.from_user.id)
+    
+    if not user or not user['group_number']:
+        await callback.answer("❌ Группа не выбрана", show_alert=True)
+        return
+    
+    week_num = int(callback.data.split('_')[1])
+    
+    # Вычисляем дату начала недели
+    today = datetime.now()
+    september_1 = datetime(today.year if today.month >= 9 else today.year - 1, 9, 1)
+    # Находим ближайший понедельник от 1 сентября
+    days_to_monday = (7 - september_1.weekday()) % 7
+    first_monday = september_1 + timedelta(days=days_to_monday)
+    target_monday = first_monday + timedelta(weeks=week_num - 1)
+    
+    week_schedule_text = f"📅 <b>Расписание группы {user['group_number']}</b>\n"
+    week_schedule_text += f"📆 Неделя {week_num} ({target_monday.strftime('%d.%m.%Y')})\n\n"
+    
+    # Получаем расписание на всю неделю
+    for i in range(6):  # ПН-СБ
+        day = target_monday + timedelta(days=i)
+        schedule = db.get_schedule_by_group(user['group_number'], day.strftime('%Y-%m-%d'))
+        
+        day_name = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'][i]
+        week_schedule_text += f"<b>{day_name} ({day.strftime('%d.%m')})</b>\n"
+        
+        if schedule:
+            for lesson in schedule:
+                week_schedule_text += (
+                    f"  🕐 {lesson['lesson_number']} пара ({lesson['start_time']}-{lesson['end_time']})\n"
+                    f"  📚 {lesson['subject_name']}\n"
+                )
+                if lesson['teacher_fio']:
+                    week_schedule_text += f"  👨‍🏫 {lesson['teacher_fio']}\n"
+                if lesson['room_number']:
+                    week_schedule_text += f"  🏢 {lesson['building_name']}, ауд. {lesson['room_number']}\n"
+        else:
+            week_schedule_text += "  Занятий нет\n"
+        
+        week_schedule_text += "\n"
+    
+    await callback.message.edit_text(
+        week_schedule_text,
+        reply_markup=get_week_selector_keyboard(),
+        parse_mode='HTML'
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "back_to_days")
+async def back_to_days(callback: types.CallbackQuery):
+    """Вернуться к выбору дня"""
+    user = db.get_user_by_telegram_id(callback.from_user.id)
+    today = datetime.now()
+    schedule = db.get_schedule_by_group(user['group_number'], today.strftime('%Y-%m-%d'))
+    
+    if schedule:
+        schedule_text = format_schedule_day(schedule, user['group_number'], today)
+    else:
+        schedule_text = f"📅 Расписание группы {user['group_number']}\n\nВыберите день:"
+    
+    await callback.message.edit_text(
+        schedule_text,
+        reply_markup=get_days_keyboard(),
+        parse_mode='HTML'
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "back_to_menu")
+async def back_to_menu(callback: types.CallbackQuery):
+    """Вернуться в главное меню"""
+    await callback.message.delete()
+    await callback.message.answer(
+        "Главное меню:",
+        reply_markup=get_main_keyboard()
+    )
+    await callback.answer()
+
 
 
 # ============== НАСТРОЙКИ ==============
