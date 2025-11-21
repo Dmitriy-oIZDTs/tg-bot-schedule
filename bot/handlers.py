@@ -447,40 +447,157 @@ async def change_group(message: types.Message, state: FSMContext):
     await state.set_state(UserStates.waiting_for_group)
 
 
-# ============== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==============
+# ============== ПОИСК ==============
 
-def format_schedule(schedule, group_number):
-    """Форматирование расписания для вывода"""
-    if not schedule:
-        return "Расписания нет"
+@dp.message(F.text == "🔍 Поиск по группе")
+@dp.message(Command("group"))
+async def search_group(message: types.Message, state: FSMContext):
+    """Поиск расписания по группе"""
+    groups = db.get_all_groups()
+    groups_text = "\n".join([f"• {g['group_number']}" for g in groups])
     
-    date = schedule[0]['lesson_date']
-    date_formatted = date.strftime('%d.%m.%Y, %A')
+    await message.answer(
+        f"🔍 <b>Поиск расписания по группе</b>\n\n"
+        f"Доступные группы:\n{groups_text}\n\n"
+        f"Введите номер группы:",
+        parse_mode='HTML'
+    )
+    await state.set_state(SearchStates.waiting_for_group_search)
+
+
+@dp.message(SearchStates.waiting_for_group_search)
+async def process_group_search(message: types.Message, state: FSMContext):
+    """Обработка поиска по группе"""
+    group_number = message.text.strip().upper()
+    groups = db.get_all_groups()
+    group = next((g for g in groups if g['group_number'].upper() == group_number), None)
     
-    text = f"📅 <b>Расписание группы {group_number}</b>\n"
-    text += f"📆 <b>{date_formatted}</b>\n\n"
+    if not group:
+        await message.answer(f"❌ Группа '{group_number}' не найдена.")
+        return
     
-    for lesson in schedule:
-        text += f"🕐 <b>{lesson['lesson_number']} пара ({lesson['start_time']} - {lesson['end_time']})</b>\n"
-        text += f"📚 {lesson['subject_name']}"
-        
-        if lesson['subject_type']:
-            text += f" ({lesson['subject_type']})"
-        
-        text += "\n"
-        
-        if lesson['teacher_fio']:
-            text += f"👨‍🏫 {lesson['teacher_fio']}\n"
-        
-        if lesson['building_name'] and lesson['room_number']:
-            text += f"🏢 {lesson['building_name']}, ауд. {lesson['room_number']}\n"
-        
-        if lesson['notes']:
-            text += f"📝 {lesson['notes']}\n"
-        
-        text += "\n"
+    await state.clear()
     
-    return text
+    # Показываем расписание на сегодня
+    today = datetime.now()
+    schedule = db.get_schedule_by_group(group_number, today.strftime('%Y-%m-%d'))
+    
+    if schedule:
+        schedule_text = format_schedule_day(schedule, group_number, today)
+    else:
+        schedule_text = f"📅 Расписание группы {group_number}\n📆 {today.strftime('%d.%m.%Y')}\n\nНа сегодня занятий нет."
+    
+    await message.answer(schedule_text, parse_mode='HTML')
+
+
+@dp.message(F.text == "👨‍🏫 Поиск по преподавателю")
+@dp.message(Command("teacher"))
+async def search_teacher(message: types.Message, state: FSMContext):
+    """Поиск расписания преподавателя"""
+    teachers = db.get_all_teachers()
+    teachers_text = "\n".join([f"• {t['fio']}" for t in teachers[:20]])  # Первые 20
+    
+    await message.answer(
+        f"👨‍🏫 <b>Поиск по преподавателю</b>\n\n"
+        f"Преподаватели (первые 20):\n{teachers_text}\n\n"
+        f"Введите ФИО преподавателя:",
+        parse_mode='HTML'
+    )
+    await state.set_state(SearchStates.waiting_for_teacher_search)
+
+
+@dp.message(SearchStates.waiting_for_teacher_search)
+async def process_teacher_search(message: types.Message, state: FSMContext):
+    """Обработка поиска по преподавателю"""
+    teacher_name = message.text.strip()
+    teachers = db.get_all_teachers()
+    teacher = next((t for t in teachers if teacher_name.lower() in t['fio'].lower()), None)
+    
+    if not teacher:
+        await message.answer(f"❌ Преподаватель '{teacher_name}' не найден.")
+        return
+    
+    await state.clear()
+    
+    # Показываем расписание на сегодня
+    today = datetime.now()
+    schedule = db.get_teacher_schedule(teacher['id'], today.strftime('%Y-%m-%d'))
+    
+    if schedule:
+        text = f"👨‍🏫 <b>Расписание: {teacher['fio']}</b>\n"
+        text += f"📆 {today.strftime('%d.%m.%Y (%A)')}\n\n"
+        
+        for lesson in schedule:
+            text += f"🕐 <b>{lesson['lesson_number']} пара ({lesson['start_time']} - {lesson['end_time']})</b>\n"
+            text += f"📚 {lesson['subject_name']}\n"
+            text += f"👥 Группа: {lesson['group_number']}\n"
+            if lesson['room_number']:
+                text += f"🏢 {lesson['building_name']}, ауд. {lesson['room_number']}\n"
+            text += "\n"
+        
+        await message.answer(text, parse_mode='HTML')
+    else:
+        await message.answer(
+            f"👨‍🏫 {teacher['fio']}\n"
+            f"📆 {today.strftime('%d.%m.%Y')}\n\n"
+            f"На сегодня пар нет."
+        )
+
+
+@dp.message(F.text == "🚪 Поиск по аудитории")
+@dp.message(Command("room"))
+async def search_room(message: types.Message, state: FSMContext):
+    """Поиск по аудитории"""
+    await message.answer(
+        f"🚪 <b>Поиск по аудитории</b>\n\n"
+        f"Введите номер аудитории (например: 101, 201А):",
+        parse_mode='HTML'
+    )
+    await state.set_state(SearchStates.waiting_for_room_search)
+
+
+@dp.message(SearchStates.waiting_for_room_search)
+async def process_room_search(message: types.Message, state: FSMContext):
+    """Обработка поиска по аудитории"""
+    room_number = message.text.strip()
+    
+    # Ищем аудиторию
+    conn = db.connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, building_id, room_number FROM rooms WHERE room_number ILIKE %s", (f"%{room_number}%",))
+    room = cursor.fetchone()
+    cursor.close()
+    db.disconnect()
+    
+    if not room:
+        await message.answer(f"❌ Аудитория '{room_number}' не найдена.")
+        return
+    
+    await state.clear()
+    
+    # Показываем занятость на сегодня
+    today = datetime.now()
+    schedule = db.get_room_schedule(room[0], today.strftime('%Y-%m-%d'))
+    
+    if schedule:
+        text = f"🚪 <b>Аудитория {room[2]}</b>\n"
+        text += f"📆 {today.strftime('%d.%m.%Y (%A)')}\n\n"
+        
+        for lesson in schedule:
+            text += f"🕐 <b>{lesson['lesson_number']} пара ({lesson['start_time']} - {lesson['end_time']})</b>\n"
+            text += f"📚 {lesson['subject_name']}\n"
+            text += f"👥 Группа: {lesson['group_number']}\n"
+            if lesson['teacher_fio']:
+                text += f"👨‍🏫 {lesson['teacher_fio']}\n"
+            text += "\n"
+        
+        await message.answer(text, parse_mode='HTML')
+    else:
+        await message.answer(
+            f"🚪 Аудитория {room[2]}\n"
+            f"📆 {today.strftime('%d.%m.%Y')}\n\n"
+            f"На сегодня свободна 🎉"
+        )
 
 
 # ============== ОБРАБОТКА ОШИБОК ==============
