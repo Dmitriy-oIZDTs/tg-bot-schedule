@@ -432,41 +432,19 @@ async def back_to_menu(callback: types.CallbackQuery):
 
 
 
-# ============== НАСТРОЙКИ ==============
+# ============== СМЕНА ГРУППЫ ==============
 
-@dp.message(F.text == "⚙️ Настройки")
-async def show_settings(message: types.Message):
-    """Показать настройки"""
-    user = db.get_user_by_telegram_id(message.from_user.id)
-    
-    if not user:
-        await message.answer("❌ Вы не зарегистрированы. Используйте /start для регистрации.")
-        return
+@dp.message(F.text == "⚙️ Сменить группу")
+async def change_group(message: types.Message, state: FSMContext):
+    """Смена группы пользователя"""
+    groups = db.get_all_groups()
+    groups_text = "\n".join([f"• {g['group_number']}" for g in groups])
     
     await message.answer(
-        "⚙️ <b>Настройки бота</b>\n\n"
-        "Выберите параметр для изменения:",
-        reply_markup=get_settings_keyboard(),
-        parse_mode='HTML'
+        f"Выберите новую группу из списка:\n\n{groups_text}\n\n"
+        "Введите номер группы:"
     )
-
-
-@dp.callback_query(F.data.startswith("settings_"))
-async def process_settings(callback: types.CallbackQuery):
-    """Обработка настроек"""
-    setting = callback.data.split("_")[1]
-    user = db.get_user_by_telegram_id(callback.from_user.id)
-    
-    if setting == "back":
-        await callback.message.delete()
-        await callback.message.answer(
-            "Главное меню:",
-            reply_markup=get_main_keyboard(user['role'])
-        )
-    else:
-        await callback.answer("⚙️ Функция в разработке", show_alert=True)
-    
-    await callback.answer()
+    await state.set_state(UserStates.waiting_for_group)
 
 
 # ============== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==============
