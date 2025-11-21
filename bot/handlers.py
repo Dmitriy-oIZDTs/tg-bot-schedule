@@ -168,6 +168,46 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
         reply_markup=get_main_keyboard()
     )
 
+# ============== ВЫБОР ГРУППЫ ==============
+
+@dp.message(UserStates.waiting_for_group)
+async def process_group_selection(message: types.Message, state: FSMContext):
+    """Обработка выбора группы"""
+    group_number = message.text.strip().upper()
+    
+    # Получаем все группы
+    groups = db.get_all_groups()
+    group = next((g for g in groups if g['group_number'].upper() == group_number), None)
+    
+    if not group:
+        groups_text = "\n".join([f"• {g['group_number']}" for g in groups])
+        await message.answer(
+            f"❌ Группа '{group_number}' не найдена.\n\n"
+            f"Доступные группы:\n{groups_text}\n\n"
+            f"Введите точное название группы:"
+        )
+        return
+    
+    # Создаем или обновляем пользователя
+    telegram_id = message.from_user.id
+    username = message.from_user.username
+    user = db.get_user_by_telegram_id(telegram_id)
+    
+    if user:
+        # Обновляем группу
+        db.update_user_group(user['id'], group['id'])
+    else:
+        # Создаем пользователя
+        user = db.create_user(telegram_id, username, None, role='user', group_id=group['id'])
+    
+    await state.clear()
+    
+    await message.answer(
+        f"✅ Группа установлена: {group_number}\n"
+        f"🏛 Факультет: {group['faculty_name']}\n\n"
+        f"Теперь вы можете просматривать расписание!",
+        reply_markup=get_main_keyboard()
+    )
 
 # ============== РЕГИСТРАЦИЯ ==============
 
