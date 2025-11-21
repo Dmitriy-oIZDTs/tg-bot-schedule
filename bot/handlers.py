@@ -209,74 +209,39 @@ async def process_group_selection(message: types.Message, state: FSMContext):
         reply_markup=get_main_keyboard()
     )
 
-# ============== РЕГИСТРАЦИЯ ==============
+# ============== МОЕ РАСПИСАНИЕ ==============
 
-@dp.message(RegistrationStates.waiting_for_fio)
-async def process_fio(message: types.Message, state: FSMContext):
-    """Обработка ввода ФИО"""
-    fio = message.text.strip()
+@dp.message(F.text == "📅 Мое расписание")
+async def show_my_schedule(message: types.Message):
+    """Показать расписание пользователя"""
+    user = db.get_user_by_telegram_id(message.from_user.id)
     
-    if len(fio.split()) < 2:
-        await message.answer("❌ Пожалуйста, введите ФИО полностью (минимум имя и фамилия):")
-        return
-    
-    await state.update_data(fio=fio)
-    
-    # Получаем список групп
-    groups = db.get_all_groups()
-    
-    groups_text = "\n".join([f"• {g['group_number']} ({g['faculty_name']})" for g in groups])
-    
-    await message.answer(
-        f"Спасибо, {fio}!\n\n"
-        f"Теперь выберите вашу группу из списка:\n\n{groups_text}\n\n"
-        f"Введите номер группы:"
-    )
-    await state.set_state(RegistrationStates.waiting_for_group)
-
-
-@dp.message(RegistrationStates.waiting_for_group)
-async def process_group(message: types.Message, state: FSMContext):
-    """Обработка выбора группы"""
-    group_number = message.text.strip().upper()
-    
-    # Получаем все группы
-    groups = db.get_all_groups()
-    group = next((g for g in groups if g['group_number'].upper() == group_number), None)
-    
-    if not group:
-        # Показываем список снова
-        groups_text = "\n".join([f"• {g['group_number']}" for g in groups])
+    if not user or not user['group_number']:
         await message.answer(
-            f"❌ Группа '{group_number}' не найдена.\n\n"
-            f"Доступные группы:\n{groups_text}\n\n"
-            f"Введите точное название группы:"
+            "❌ Сначала выберите группу.\n"
+            "Используйте /start для выбора группы."
         )
         return
     
-    # Получаем данные из состояния
-    data = await state.get_data()
-    fio = data['fio']
+    # Получаем расписание на сегодня
+    today = datetime.now()
+    schedule = db.get_schedule_by_group(user['group_number'], today.strftime('%Y-%m-%d'))
     
-    # Создаем пользователя
-    telegram_id = message.from_user.id
-    username = message.from_user.username
-    
-    user = db.create_user(telegram_id, username, fio, role='user', group_id=group['id'])
-    
-    await state.clear()
-    
-    await message.answer(
-        f"✅ Регистрация завершена!\n\n"
-        f"👤 ФИО: {fio}\n"
-        f"🎓 Группа: {group_number}\n"
-        f"🏛 Факультет: {group['faculty_name']}\n\n"
-        f"Теперь вы можете пользоваться всеми функциями бота.",
-        reply_markup=get_main_keyboard('user')
-    )
-    
-    db.log_user_action(user['id'], 'registration', f'Пользователь зарегистрирован: {fio}, {group_number}')
-
+    if schedule:
+        schedule_text = format_schedule_day(schedule, user['group_number'], today)
+        await message.answer(
+            schedule_text,
+            reply_markup=get_days_keyboard(),
+            parse_mode='HTML'
+        )
+    else:
+        await message.answer(
+            f"📅 Расписание группы {user['group_number']}\n"
+            f"📆 {today.strftime('%d.%m.%Y (%A)')}\n\n"
+            f"На сегодня занятий нет 🎉",
+            reply_markup=get_days_keyboard(),
+            parse_mode='HTML'
+        )
 
 # ============== РАСПИСАНИЕ ==============
 
