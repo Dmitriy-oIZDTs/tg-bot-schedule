@@ -176,6 +176,11 @@ async def process_group_selection(message: types.Message, state: FSMContext):
     """Обработка выбора группы"""
     group_number = message.text.strip().upper()
     
+    # Игнорируем кнопки меню
+    if group_number in ['📅 МОЕ РАСПИСАНИЕ', '🔍 ПОИСК ПО ГРУППЕ', '👨‍🏫 ПОИСК ПО ПРЕПОДАВАТЕЛЮ', 
+                        '🚪 ПОИСК ПО АУДИТОРИИ', '⚙️ СМЕНИТЬ ГРУППУ', '❓ ПОМОЩЬ']:
+        return
+    
     # Получаем все группы
     groups = db.get_all_groups()
     group = next((g for g in groups if g['group_number'].upper() == group_number), None)
