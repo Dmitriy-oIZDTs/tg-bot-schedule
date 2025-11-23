@@ -8,6 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta
+import calendar
 import logging
 
 from config.settings import BOT_TOKEN
@@ -19,22 +20,22 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Инициализация базы данных
-db = DatabaseManager()
-
-
-# Состояния для FSM (Finite State Machine)
-class RegistrationStates(StatesGroup):
-    """Состояния для регистрации пользователя"""
-    waiting_for_fio = State()
+# Состояния для FSM
+class UserStates(StatesGroup):
+    """Состояния пользователя"""
     waiting_for_group = State()
+    viewing_schedule = State()
 
 
-class ScheduleStates(StatesGroup):
-    """Состояния для работы с расписанием"""
-    waiting_for_date = State()
-    waiting_for_group_number = State()
+class SearchStates(StatesGroup):
+    """Состояния для поиска"""
+    waiting_for_group_search = State()
+    waiting_for_teacher_search = State()
+    waiting_for_room_search = State()
 
+
+# Инициализация базы данных (ПОСЛЕ определения состояний!)
+db = DatabaseManager()
 
 # ============== КЛАВИАТУРЫ ==============
 
