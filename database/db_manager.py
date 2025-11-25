@@ -270,11 +270,11 @@ class DatabaseManager:
         return self.execute_query(query, fetch=True)
     
     def get_all_teachers(self):
-        """Получение списка всех преподавателей"""
+        """Получение списка всех преподавателей (без дублей)"""
         query = """
-            SELECT DISTINCT id, fio, department, position
+            SELECT DISTINCT ON (fio) id, fio, department, position
             FROM teachers
-            ORDER BY fio
+            ORDER BY fio, id
         """
         return self.execute_query(query, fetch=True)
     
