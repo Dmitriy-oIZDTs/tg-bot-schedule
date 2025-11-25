@@ -272,7 +272,7 @@ class DatabaseManager:
     def get_all_teachers(self):
         """Получение списка всех преподавателей"""
         query = """
-            SELECT id, fio, department, position
+            SELECT DISTINCT id, fio, department, position
             FROM teachers
             ORDER BY fio
         """

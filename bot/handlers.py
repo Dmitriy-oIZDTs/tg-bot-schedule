@@ -475,6 +475,12 @@ async def search_group(message: types.Message, state: FSMContext):
 async def process_group_search(message: types.Message, state: FSMContext):
     """Обработка поиска по группе"""
     group_number = message.text.strip().upper()
+    
+    # Игнорируем кнопки меню
+    if group_number in ['📅 МОЕ РАСПИСАНИЕ', '🔍 ПОИСК ПО ГРУППЕ', '👨‍🏫 ПОИСК ПО ПРЕПОДАВАТЕЛЮ', 
+                        '🚪 ПОИСК ПО АУДИТОРИИ', '⚙️ СМЕНИТЬ ГРУППУ', '❓ ПОМОЩЬ']:
+        return
+    
     groups = db.get_all_groups()
     group = next((g for g in groups if g['group_number'].upper() == group_number), None)
     
@@ -511,11 +517,16 @@ async def search_teacher(message: types.Message, state: FSMContext):
     )
     await state.set_state(SearchStates.waiting_for_teacher_search)
 
-
 @dp.message(SearchStates.waiting_for_teacher_search)
 async def process_teacher_search(message: types.Message, state: FSMContext):
     """Обработка поиска по преподавателю"""
     teacher_name = message.text.strip()
+    
+    # Игнорируем кнопки меню
+    if teacher_name.upper() in ['📅 МОЕ РАСПИСАНИЕ', '🔍 ПОИСК ПО ГРУППЕ', '👨‍🏫 ПОИСК ПО ПРЕПОДАВАТЕЛЮ', 
+                                 '🚪 ПОИСК ПО АУДИТОРИИ', '⚙️ СМЕНИТЬ ГРУППУ', '❓ ПОМОЩЬ']:
+        return
+    
     teachers = db.get_all_teachers()
     teacher = next((t for t in teachers if teacher_name.lower() in t['fio'].lower()), None)
     
@@ -566,6 +577,11 @@ async def search_room(message: types.Message, state: FSMContext):
 async def process_room_search(message: types.Message, state: FSMContext):
     """Обработка поиска по аудитории"""
     room_number = message.text.strip()
+    
+    # Игнорируем кнопки меню
+    if room_number.upper() in ['📅 МОЕ РАСПИСАНИЕ', '🔍 ПОИСК ПО ГРУППЕ', '👨‍🏫 ПОИСК ПО ПРЕПОДАВАТЕЛЮ', 
+                               '🚪 ПОИСК ПО АУДИТОРИИ', '⚙️ СМЕНИТЬ ГРУППУ', '❓ ПОМОЩЬ']:
+        return
     
     # Ищем аудиторию
     conn = db.connect()
