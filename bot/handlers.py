@@ -110,7 +110,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
     user = db.get_user_by_telegram_id(telegram_id)
     
     if user and user['group_id']:
-        # Пользователь уже выбрал группу
         await message.answer(
             f"С возвращением!\n"
             f"Ваша группа: {user['group_number']}\n\n"
@@ -118,14 +117,15 @@ async def cmd_start(message: types.Message, state: FSMContext):
             reply_markup=get_main_keyboard()
         )
     else:
-        # Новый пользователь - выбор группы
         groups = db.get_all_groups()
-        groups_text = "\n".join([f"• {g['group_number']}" for g in groups])
+        groups_text = "\n".join([f"{g['group_number']}" for g in groups])
         
         await message.answer(
             "👋 Добро пожаловать в бот расписания!\n\n"
-            f"Выберите вашу группу из списка:\n\n{groups_text}\n\n"
-            "Введите номер группы:"
+            f"Выберите вашу группу из списка:\n\n"
+            f"<code>{groups_text}</code>\n\n"
+            "Введите номер группы:",
+            parse_mode='HTML'
         )
         await state.set_state(UserStates.waiting_for_group)
 
@@ -181,16 +181,17 @@ async def process_group_selection(message: types.Message, state: FSMContext):
                         '🚪 ПОИСК ПО АУДИТОРИИ', '⚙️ СМЕНИТЬ ГРУППУ', '❓ ПОМОЩЬ']:
         return
     
-    # Получаем все группы
     groups = db.get_all_groups()
     group = next((g for g in groups if g['group_number'].upper() == group_number), None)
     
     if not group:
-        groups_text = "\n".join([f"• {g['group_number']}" for g in groups])
+        groups_text = "\n".join([f"{g['group_number']}" for g in groups])
         await message.answer(
             f"❌ Группа '{group_number}' не найдена.\n\n"
-            f"Доступные группы:\n{groups_text}\n\n"
-            f"Введите точное название группы:"
+            f"Доступные группы:\n\n"
+            f"<code>{groups_text}</code>\n\n"
+            f"Введите точное название группы:",
+            parse_mode='HTML'
         )
         return
     
@@ -444,11 +445,13 @@ async def back_to_menu(callback: types.CallbackQuery):
 async def change_group(message: types.Message, state: FSMContext):
     """Смена группы пользователя"""
     groups = db.get_all_groups()
-    groups_text = "\n".join([f"• {g['group_number']}" for g in groups])
+    groups_text = "\n".join([f"{g['group_number']}" for g in groups])
     
     await message.answer(
-        f"Выберите новую группу из списка:\n\n{groups_text}\n\n"
-        "Введите номер группы:"
+        f"Выберите новую группу из списка:\n\n"
+        f"<code>{groups_text}</code>\n\n"
+        "Введите номер группы:",
+        parse_mode='HTML'
     )
     await state.set_state(UserStates.waiting_for_group)
 
@@ -460,11 +463,12 @@ async def change_group(message: types.Message, state: FSMContext):
 async def search_group(message: types.Message, state: FSMContext):
     """Поиск расписания по группе"""
     groups = db.get_all_groups()
-    groups_text = "\n".join([f"• {g['group_number']}" for g in groups])
+    groups_text = "\n".join([f"{g['group_number']}" for g in groups])
     
     await message.answer(
         f"🔍 <b>Поиск расписания по группе</b>\n\n"
-        f"Доступные группы:\n{groups_text}\n\n"
+        f"Доступные группы:\n\n"
+        f"<code>{groups_text}</code>\n\n"
         f"Введите номер группы:",
         parse_mode='HTML'
     )
@@ -507,11 +511,12 @@ async def process_group_search(message: types.Message, state: FSMContext):
 async def search_teacher(message: types.Message, state: FSMContext):
     """Поиск расписания преподавателя"""
     teachers = db.get_all_teachers()
-    teachers_text = "\n".join([f"• {t['fio']}" for t in teachers[:20]])  # Первые 20
+    teachers_text = "\n".join([f"{t['fio']}" for t in teachers[:20]])
     
     await message.answer(
         f"👨‍🏫 <b>Поиск по преподавателю</b>\n\n"
-        f"Преподаватели (первые 20):\n{teachers_text}\n\n"
+        f"Преподаватели (первые 20):\n\n"
+        f"<code>{teachers_text}</code>\n\n"
         f"Введите ФИО преподавателя:",
         parse_mode='HTML'
     )
