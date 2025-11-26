@@ -3,6 +3,7 @@
 """
 
 import psycopg2
+from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 import logging
 from config.settings import DB_CONFIG
@@ -15,23 +16,37 @@ class DatabaseManager:
     """Класс для управления подключением и операциями с базой данных"""
     
     def __init__(self):
-        self.connection = None
+        self.connection_pool = None
+        self.init_pool()
     
-    def connect(self):
-        """Установка соединения с базой данных"""
+    def init_pool(self):
+        """Инициализация пула соединений"""
         try:
-            self.connection = psycopg2.connect(**DB_CONFIG)
-            logger.info("Подключение к базе данных установлено")
-            return self.connection
+            self.connection_pool = psycopg2.pool.SimpleConnectionPool(
+                1,  # минимум соединений
+                10,  # максимум соединений
+                **DB_CONFIG
+            )
+            logger.info("Пул соединений создан")
         except Exception as e:
-            logger.error(f"Ошибка подключения к базе данных: {e}")
+            logger.error(f"Ошибка создания пула: {e}")
             raise
     
-    def disconnect(self):
-        """Закрытие соединения с базой данных"""
-        if self.connection:
-            self.connection.close()
-            logger.info("Соединение с базой данных закрыто")
+    def connect(self):
+        """Получение соединения из пула"""
+        try:
+            connection = self.connection_pool.getconn()
+            logger.info("Соединение получено из пула")
+            return connection
+        except Exception as e:
+            logger.error(f"Ошибка получения соединения: {e}")
+            raise
+    
+    def disconnect(self, connection=None):
+        """Возврат соединения в пул"""
+        if connection:
+            self.connection_pool.putconn(connection)
+            logger.info("Соединение возвращено в пул")
     
     def init_database(self):
         """Инициализация базы данных: создание таблиц и заполнение начальными данными"""
@@ -60,7 +75,7 @@ class DatabaseManager:
             raise
         finally:
             cursor.close()
-            self.disconnect()
+            self.disconnect(conn)  # Возвращаем соединение в пул
     
     def execute_query(self, query, params=None, fetch=False):
         """
@@ -143,7 +158,7 @@ class DatabaseManager:
             raise
         finally:
             cursor.close()
-            self.disconnect()
+            self.disconnect(conn)  # ВАЖНО: передаем conn!
     
     def update_user_group(self, user_id, group_id):
         """Обновление группы пользователя"""

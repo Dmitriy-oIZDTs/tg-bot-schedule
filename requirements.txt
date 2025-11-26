@@ -23,3 +23,5 @@ colorlog==6.8.0
 
 # Работа с временем
 pytz==2023.3
+
+psycopg2-pool
