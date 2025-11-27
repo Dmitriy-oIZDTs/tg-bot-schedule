@@ -306,20 +306,36 @@ async def show_week_schedule(callback: types.CallbackQuery):
     # Получаем понедельник текущей недели
     today = datetime.now()
     monday = today - timedelta(days=today.weekday())
+    sunday = monday + timedelta(days=6)
     
+    # ОДИН ЗАПРОС на всю неделю!
+    schedule = db.get_schedule_by_group_range(
+        user['group_number'], 
+        monday.strftime('%Y-%m-%d'),
+        sunday.strftime('%Y-%m-%d')
+    )
+    
+    # Группируем по дням
+    schedule_by_day = {}
+    for lesson in schedule:
+        day = lesson['lesson_date']
+        if day not in schedule_by_day:
+            schedule_by_day[day] = []
+        schedule_by_day[day].append(lesson)
+    
+    # Формируем текст
     week_schedule_text = f"📅 <b>Расписание группы {user['group_number']}</b>\n"
     week_schedule_text += f"📆 Неделя с {monday.strftime('%d.%m.%Y')}\n\n"
     
-    # Получаем расписание на всю неделю
-    for i in range(6):  # ПН-СБ
+    for i in range(6):
         day = monday + timedelta(days=i)
-        schedule = db.get_schedule_by_group(user['group_number'], day.strftime('%Y-%m-%d'))
-        
+        day_str = day.strftime('%Y-%m-%d')
         day_name = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'][i]
+        
         week_schedule_text += f"<b>{day_name} ({day.strftime('%d.%m')})</b>\n"
         
-        if schedule:
-            for lesson in schedule:
+        if day_str in schedule_by_day:
+            for lesson in schedule_by_day[day_str]:
                 week_schedule_text += (
                     f"  🕐 {lesson['lesson_number']} пара ({lesson['start_time']}-{lesson['end_time']})\n"
                     f"  📚 {lesson['subject_name']}\n"
