@@ -204,6 +204,32 @@ class DatabaseManager:
         """
         return self.execute_query(query, (group_number, date), fetch=True)
     
+    def get_schedule_by_group_range(self, group_number, date_from, date_to):
+        """Получение расписания группы за период"""
+        query = """
+            SELECT 
+                s.lesson_date,
+                lt.lesson_number,
+                lt.start_time,
+                lt.end_time,
+                sub.name as subject_name,
+                sub.subject_type,
+                t.fio as teacher_fio,
+                b.name as building_name,
+                r.room_number
+            FROM schedule s
+            JOIN student_groups sg ON s.group_id = sg.id
+            JOIN lesson_times lt ON s.lesson_time_id = lt.id
+            JOIN subjects sub ON s.subject_id = sub.id
+            LEFT JOIN teachers t ON s.teacher_id = t.id
+            LEFT JOIN rooms r ON s.room_id = r.id
+            LEFT JOIN buildings b ON r.building_id = b.id
+            WHERE sg.group_number = %s 
+            AND s.lesson_date BETWEEN %s AND %s
+            ORDER BY s.lesson_date, lt.lesson_number
+        """
+        return self.execute_query(query, (group_number, date_from, date_to), fetch=True)
+
     def get_schedule_by_faculty(self, faculty_id, date):
         """Получение расписания всего факультета на дату"""
         query = """

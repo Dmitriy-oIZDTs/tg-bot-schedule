@@ -427,13 +427,23 @@ async def show_week_by_number(callback: types.CallbackQuery):
 async def back_to_days(callback: types.CallbackQuery):
     """Вернуться к выбору дня"""
     user = db.get_user_by_telegram_id(callback.from_user.id)
+    
+    if not user or not user['group_number']:
+        await callback.answer("❌ Группа не выбрана", show_alert=True)
+        await callback.message.delete()
+        return
+    
     today = datetime.now()
     schedule = db.get_schedule_by_group(user['group_number'], today.strftime('%Y-%m-%d'))
     
     if schedule:
         schedule_text = format_schedule_day(schedule, user['group_number'], today)
     else:
-        schedule_text = f"📅 Расписание группы {user['group_number']}\n\nВыберите день:"
+        schedule_text = (
+            f"📅 <b>Расписание группы {user['group_number']}</b>\n"
+            f"📆 {today.strftime('%d.%m.%Y (%A)')}\n\n"
+            f"На сегодня занятий нет 🎉"
+        )
     
     await callback.message.edit_text(
         schedule_text,
@@ -681,5 +691,23 @@ def format_schedule_day(schedule, group_number, date):
 @dp.errors()
 async def error_handler(update: types.Update, exception: Exception):
     """Глобальный обработчик ошибок"""
-    logger.error(f"Ошибка: {exception}", exc_info=True)
+    logger.error(f"Ошибка при обработке update {update.update_id}: {exception}", exc_info=True)
+    
+    # Пытаемся уведомить пользователя
+    if update.message:
+        try:
+            await update.message.answer(
+                "⚠️ Произошла ошибка. Попробуйте еще раз или используйте /start"
+            )
+        except:
+            pass
+    elif update.callback_query:
+        try:
+            await update.callback_query.answer(
+                "⚠️ Произошла ошибка. Попробуйте еще раз.",
+                show_alert=True
+            )
+        except:
+            pass
+    
     return True
