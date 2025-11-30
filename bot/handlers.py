@@ -615,12 +615,9 @@ async def process_room_search(message: types.Message, state: FSMContext):
         return
     
     # Ищем аудиторию
-    conn = db.connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, building_id, room_number FROM rooms WHERE room_number ILIKE %s", (f"%{room_number}%",))
-    room = cursor.fetchone()
-    cursor.close()
-    db.disconnect()
+    query = "SELECT id, building_id, room_number FROM rooms WHERE room_number ILIKE %s"
+    result = db.execute_query(query, (f"%{room_number}%",), fetch=True)
+    room = result[0] if result else None
     
     if not room:
         await message.answer(f"❌ Аудитория '{room_number}' не найдена.")
@@ -689,25 +686,7 @@ def format_schedule_day(schedule, group_number, date):
 # ============== ОБРАБОТКА ОШИБОК ==============
 
 @dp.errors()
-async def error_handler(update: types.Update, exception: Exception):
+async def error_handler(update, exception):  # БЕЗ типов!
     """Глобальный обработчик ошибок"""
-    logger.error(f"Ошибка при обработке update {update.update_id}: {exception}", exc_info=True)
-    
-    # Пытаемся уведомить пользователя
-    if update.message:
-        try:
-            await update.message.answer(
-                "⚠️ Произошла ошибка. Попробуйте еще раз или используйте /start"
-            )
-        except:
-            pass
-    elif update.callback_query:
-        try:
-            await update.callback_query.answer(
-                "⚠️ Произошла ошибка. Попробуйте еще раз.",
-                show_alert=True
-            )
-        except:
-            pass
-    
+    logger.error(f"Ошибка: {exception}", exc_info=True)
     return True

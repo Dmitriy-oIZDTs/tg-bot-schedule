@@ -3,7 +3,6 @@
 """
 
 import psycopg2
-from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 import logging
 from config.settings import DB_CONFIG
@@ -16,53 +15,34 @@ class DatabaseManager:
     """Класс для управления подключением и операциями с базой данных"""
     
     def __init__(self):
-        self.connection_pool = None
-        self.init_pool()
-    
-    def init_pool(self):
-        """Инициализация пула соединений"""
-        try:
-            self.connection_pool = psycopg2.pool.SimpleConnectionPool(
-                1,  # минимум соединений
-                10,  # максимум соединений
-                **DB_CONFIG
-            )
-            logger.info("Пул соединений создан")
-        except Exception as e:
-            logger.error(f"Ошибка создания пула: {e}")
-            raise
+        self.connection = None
     
     def connect(self):
-        """Получение соединения из пула"""
+        """Установка соединения с базой данных"""
         try:
-            connection = self.connection_pool.getconn()
-            logger.info("Соединение получено из пула")
-            return connection
+            self.connection = psycopg2.connect(**DB_CONFIG)
+            return self.connection
         except Exception as e:
-            logger.error(f"Ошибка получения соединения: {e}")
+            logger.error(f"Ошибка подключения к базе данных: {e}")
             raise
     
-    def disconnect(self, connection=None):
-        """Возврат соединения в пул"""
-        if connection:
-            self.connection_pool.putconn(connection)
-            logger.info("Соединение возвращено в пул")
+    def disconnect(self):
+        """Закрытие соединения с базой данных"""
+        if self.connection:
+            self.connection.close()
     
     def init_database(self):
-        """Инициализация базы данных: создание таблиц и заполнение начальными данными"""
+        """Инициализация базы данных"""
         conn = self.connect()
         cursor = conn.cursor()
         
         try:
-            # Создание таблиц
             logger.info("Создание таблиц...")
             cursor.execute(CREATE_TABLES_SQL)
             
-            # Заполнение времени пар
             logger.info("Заполнение времени пар...")
             cursor.execute(INSERT_LESSON_TIMES_SQL)
             
-            # Заполнение тестовыми данными
             logger.info("Заполнение тестовыми данными...")
             cursor.execute(INSERT_TEST_DATA_SQL)
             
@@ -75,17 +55,10 @@ class DatabaseManager:
             raise
         finally:
             cursor.close()
-            self.disconnect(conn)  # Возвращаем соединение в пул
+            self.disconnect()
     
     def execute_query(self, query, params=None, fetch=False):
-        """
-        Выполнение SQL-запроса
-        
-        :param query: SQL-запрос
-        :param params: Параметры запроса
-        :param fetch: Нужно ли получить результат
-        :return: Результат запроса или None
-        """
+        """Выполнение SQL-запроса"""
         conn = self.connect()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
@@ -158,7 +131,7 @@ class DatabaseManager:
             raise
         finally:
             cursor.close()
-            self.disconnect(conn)  # ВАЖНО: передаем conn!
+            self.disconnect()
     
     def update_user_group(self, user_id, group_id):
         """Обновление группы пользователя"""
