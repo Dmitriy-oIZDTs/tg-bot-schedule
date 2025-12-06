@@ -24,7 +24,7 @@
 ### 1. Применить миграцию к базе данных
 
 ```bash
-cd /home/lunst/tg-bot-schedule
+cd /tg-bot-schedule
 psql -U postgres -d schedule_bot_db -f /home/claude/migration_add_features.sql
 ```
 
@@ -32,19 +32,19 @@ psql -U postgres -d schedule_bot_db -f /home/claude/migration_add_features.sql
 
 ```bash
 # Конфигурация ролей
-cp /home/claude/config_roles.py config/roles.py
+cp /home/config_roles.py config/roles.py
 
 # Обработчики команд
-cp /home/claude/bot_commands.py bot/commands.py
+cp /home/bot_commands.py bot/commands.py
 
 # Обработчики настроек
-cp /home/claude/bot_settings_handlers.py bot/settings_handlers.py
+cp /home/bot_settings_handlers.py bot/settings_handlers.py
 
 # Админ-панель
-cp /home/claude/bot_admin_handlers.py bot/admin_handlers.py
+cp /home/bot_admin_handlers.py bot/admin_handlers.py
 
 # Скрипт генерации расписания
-cp /home/claude/generate_schedule.py scripts/generate_schedule.py
+cp /home/generate_schedule.py scripts/generate_schedule.py
 chmod +x scripts/generate_schedule.py
 ```
 
