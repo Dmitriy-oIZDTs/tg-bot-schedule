@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Скрипт для проверки расписания в базе данных
 Показывает статистику по неделям и месяцам
@@ -115,4 +114,5 @@ def check_schedule_stats():
 
 
 if __name__ == "__main__":
+
     check_schedule_stats()
