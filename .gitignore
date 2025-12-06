@@ -64,3 +64,4 @@ files/
 schedules/
 
 .env
+bot.log

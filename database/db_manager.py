@@ -1,5 +1,6 @@
 """
 Менеджер базы данных для работы с PostgreSQL
+ИСПРАВЛЕНО: убран параметр commit, убрано дублирование методов
 """
 
 import psycopg2
@@ -141,14 +142,6 @@ class DatabaseManager:
             WHERE id = %s
         """
         self.execute_query(query, (group_id, user_id))
-
-    def log_user_action(self, user_id, action_type, action_details=None):
-        """Логирование действий пользователя"""
-        query = """
-            INSERT INTO user_actions_log (user_id, action_type, action_details)
-            VALUES (%s, %s, %s)
-        """
-        self.execute_query(query, (user_id, action_type, action_details))
     
     def get_schedule_by_group(self, group_number, date):
         """Получение расписания группы на определенную дату"""
@@ -292,15 +285,82 @@ class DatabaseManager:
         """
         return self.execute_query(query, fetch=True)
     
-    def get_user_settings(self, user_id):
+    def get_all_users(self):
+        """Получение всех пользователей"""
+        query = "SELECT id, telegram_id, username, role FROM users"
+        return self.execute_query(query, fetch=True)
+
+    # ===== РОЛИ ПОЛЬЗОВАТЕЛЕЙ =====
+
+    def update_user_role(self, user_id: int, role: str):
+        """Обновление роли пользователя"""
+        query = "UPDATE users SET role = %s WHERE id = %s"
+        self.execute_query(query, (role, user_id))
+
+    # ===== НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ =====
+
+    def get_user_settings(self, user_id: int):
         """Получение настроек пользователя"""
-        query = "SELECT * FROM user_settings WHERE user_id = %s"
-        result = self.execute_query(query, (user_id,), fetch=True)
-        return result[0] if result else None
-    
-    def update_user_settings(self, user_id, **settings):
-        """Обновление настроек пользователя"""
-        fields = ', '.join([f"{key} = %s" for key in settings.keys()])
-        query = f"UPDATE user_settings SET {fields}, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s"
-        values = list(settings.values()) + [user_id]
-        self.execute_query(query, values)
+        query = """
+            SELECT time_format, notifications, default_view, theme
+            FROM user_settings
+            WHERE user_id = %s
+        """
+        rows = self.execute_query(query, (user_id,), fetch=True)
+        return rows[0] if rows else None
+
+    def update_user_settings(self, user_id: int, settings: dict):
+        """
+        Обновление настроек пользователя
+        settings: {'time_format': '24', 'notifications': True, ...}
+        """
+        # Проверяем, есть ли запись
+        existing = self.get_user_settings(user_id)
+        if existing is None:
+            # Создаём запись по умолчанию
+            insert_query = "INSERT INTO user_settings (user_id) VALUES (%s)"
+            self.execute_query(insert_query, (user_id,))
+
+        # Формируем динамический UPDATE
+        fields = []
+        values = []
+        for key, value in settings.items():
+            fields.append(f"{key} = %s")
+            values.append(value)
+        values.append(user_id)
+
+        update_query = f"""
+            UPDATE user_settings
+            SET {", ".join(fields)}, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = %s
+        """
+        self.execute_query(update_query, tuple(values))
+
+    # ===== ЛОГИ ДЕЙСТВИЙ ПОЛЬЗОВАТЕЛЕЙ =====
+
+    def log_user_action(self, telegram_id: int, action: str, details: str = ""):
+        """
+        Записываем действие в таблицу user_actions
+        """
+        user = self.get_user_by_telegram_id(telegram_id)
+        user_id = user["id"] if user else None
+        username = user["username"] if user else None
+
+        query = """
+            INSERT INTO user_actions (user_id, telegram_id, username, action, details)
+            VALUES (%s, %s, %s, %s, %s)
+        """
+        self.execute_query(query, (user_id, telegram_id, username, action, details))
+
+    def get_user_actions(self, last_days: int = 1):
+        """
+        Возвращает последние действия пользователей за N дней
+        """
+        query = """
+            SELECT user_id, telegram_id, username, action, details, created_at
+            FROM user_actions
+            WHERE created_at >= NOW() - INTERVAL %s
+            ORDER BY created_at DESC
+        """
+        param = f"{last_days} days"
+        return self.execute_query(query, (param,), fetch=True)
