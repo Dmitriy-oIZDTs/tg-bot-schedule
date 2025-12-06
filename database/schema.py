@@ -1,44 +1,46 @@
 # -*- coding: utf-8 -*-
 
+
 CREATE_TABLES_SQL = """
--- =========================
--- ТАБЛИЦА КОРПУСОВ
--- =========================
+-- Таблица корпусов университета
 CREATE TABLE IF NOT EXISTS buildings (
     id SERIAL PRIMARY KEY,
-    building_name VARCHAR(255) NOT NULL,
+    name VARCHAR(100) NOT NULL,
     address VARCHAR(255),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- =========================
--- ТАБЛИЦА АУДИТОРИЙ
--- =========================
+-- Таблица кабинетов
 CREATE TABLE IF NOT EXISTS rooms (
     id SERIAL PRIMARY KEY,
-    building_id INTEGER REFERENCES buildings(id) ON DELETE SET NULL,
-    room_number VARCHAR(50) NOT NULL,
+    building_id INTEGER REFERENCES buildings(id) ON DELETE CASCADE,
+    room_number VARCHAR(20) NOT NULL,
     capacity INTEGER,
-    room_type VARCHAR(50),
+    room_type VARCHAR(50), -- лекционная, практическая, лабораторная
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (building_id, room_number)
+    UNIQUE(building_id, room_number)
 );
 
--- =========================
--- ТАБЛИЦА ГРУПП
--- =========================
-CREATE TABLE IF NOT EXISTS groups (
+-- Таблица факультетов
+CREATE TABLE IF NOT EXISTS faculties (
     id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    short_name VARCHAR(50),
+    dean_fio VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Таблица групп
+CREATE TABLE IF NOT EXISTS student_groups (
+    id SERIAL PRIMARY KEY,
+    faculty_id INTEGER REFERENCES faculties(id) ON DELETE CASCADE,
     group_number VARCHAR(50) NOT NULL UNIQUE,
-    faculty_name VARCHAR(255),
     course INTEGER,
     students_count INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- =========================
--- ТАБЛИЦА ПРЕПОДАВАТЕЛЕЙ
--- =========================
+-- Таблица преподавателей
 CREATE TABLE IF NOT EXISTS teachers (
     id SERIAL PRIMARY KEY,
     fio VARCHAR(255) NOT NULL,
@@ -49,9 +51,7 @@ CREATE TABLE IF NOT EXISTS teachers (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- =========================
--- ТАБЛИЦА ПРЕДМЕТОВ (опционально, если нужно отдельно хранить)
--- =========================
+-- Таблица предметов
 CREATE TABLE IF NOT EXISTS subjects (
     id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
@@ -61,10 +61,8 @@ CREATE TABLE IF NOT EXISTS subjects (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- =========================
--- ТАБЛИЦА ВРЕМЕНИ ПАР
--- =========================
-CREATE TABLE IF NOT EXISTS lessons_time (
+-- Таблица времени пар
+CREATE TABLE IF NOT EXISTS lesson_times (
     id SERIAL PRIMARY KEY,
     lesson_number INTEGER NOT NULL UNIQUE,
     start_time TIME NOT NULL,
@@ -72,105 +70,69 @@ CREATE TABLE IF NOT EXISTS lessons_time (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- =========================
--- ТАБЛИЦА РАСПИСАНИЯ
--- =========================
+-- Таблица расписания
 CREATE TABLE IF NOT EXISTS schedule (
     id SERIAL PRIMARY KEY,
-
-    -- Дата и номер пары
-    lesson_date   DATE NOT NULL,
-    lesson_number INTEGER NOT NULL,
-
-    -- Название предмета и тип (лекция/пр/лаб)
-    subject_name  VARCHAR(255) NOT NULL,
-    subject_type  VARCHAR(50),
-    notes         TEXT,
-
-    -- Связи
-    group_id      INTEGER REFERENCES groups(id) ON DELETE CASCADE,
-    teacher_id    INTEGER REFERENCES teachers(id) ON DELETE SET NULL,
-    room_id       INTEGER REFERENCES rooms(id) ON DELETE SET NULL,
-
-    -- Денормализованные поля (для быстрого вывода без JOIN)
-    group_number  VARCHAR(50),
-    teacher_fio   VARCHAR(255),
-    building_name VARCHAR(255),
-    room_number   VARCHAR(50),
-
-    -- Время пары (дублируем из lessons_time)
-    start_time    TIME,
-    end_time      TIME,
-
+    group_id INTEGER REFERENCES student_groups(id) ON DELETE CASCADE,
+    subject_id INTEGER REFERENCES subjects(id) ON DELETE CASCADE,
+    teacher_id INTEGER REFERENCES teachers(id) ON DELETE SET NULL,
+    room_id INTEGER REFERENCES rooms(id) ON DELETE SET NULL,
+    lesson_time_id INTEGER REFERENCES lesson_times(id) ON DELETE CASCADE,
+    lesson_date DATE NOT NULL,
+    day_of_week INTEGER, -- 1-7 (понедельник-воскресенье)
+    week_number INTEGER, -- номер недели в семестре
+    is_numerator BOOLEAN DEFAULT TRUE, -- числитель/знаменатель
+    notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_schedule_group_date
-    ON schedule (group_number, lesson_date);
-
-CREATE INDEX IF NOT EXISTS idx_schedule_teacher_date
-    ON schedule (teacher_id, lesson_date);
-
-CREATE INDEX IF NOT EXISTS idx_schedule_room_date
-    ON schedule (room_id, lesson_date);
-
--- =========================
--- ТАБЛИЦА ПОЛЬЗОВАТЕЛЕЙ БОТА
--- =========================
+-- Таблица пользователей бота
 CREATE TABLE IF NOT EXISTS users (
-    id          SERIAL PRIMARY KEY,
+    id SERIAL PRIMARY KEY,
     telegram_id BIGINT NOT NULL UNIQUE,
-    username    VARCHAR(255),
-    full_name   VARCHAR(255),
-    role        VARCHAR(50) NOT NULL DEFAULT 'user', -- user, admin, developer
-    group_id    INTEGER REFERENCES groups(id) ON DELETE SET NULL,
-    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMP NOT NULL DEFAULT NOW()
+    username VARCHAR(100),
+    fio VARCHAR(255),
+    role VARCHAR(50) DEFAULT 'user', -- developer, admin, user
+    group_id INTEGER REFERENCES student_groups(id) ON DELETE SET NULL,
+    is_active BOOLEAN DEFAULT TRUE,
+    registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_users_telegram_id
-    ON users (telegram_id);
+-- Таблица логов действий пользователей
+CREATE TABLE IF NOT EXISTS user_actions_log (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    action_type VARCHAR(100) NOT NULL,
+    action_details TEXT,
+    ip_address VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
--- =========================
--- ТАБЛИЦА НАСТРОЕК ПОЛЬЗОВАТЕЛЕЙ
--- (СООТВЕТСТВУЕТ handlers.py: time_format, notifications, default_view, theme)
--- =========================
+-- Таблица настроек бота для пользователей
 CREATE TABLE IF NOT EXISTS user_settings (
-    id            SERIAL PRIMARY KEY,
-    user_id       INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
-    time_format   VARCHAR(10) NOT NULL DEFAULT '24',      -- '24' или '12'
-    notifications BOOLEAN NOT NULL DEFAULT TRUE,          -- включены/выключены
-    default_view  VARCHAR(10) NOT NULL DEFAULT 'day',     -- 'day' или 'week'
-    theme         VARCHAR(10) NOT NULL DEFAULT 'light',   -- 'light' или 'dark' (пока заглушка)
-    updated_at    TIMESTAMP NOT NULL DEFAULT NOW()
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE UNIQUE,
+    notifications_enabled BOOLEAN DEFAULT TRUE,
+    notification_time TIME DEFAULT '08:00',
+    show_week_schedule BOOLEAN DEFAULT FALSE,
+    show_teacher_info BOOLEAN DEFAULT TRUE,
+    show_room_info BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- =========================
--- ТАБЛИЦА ЛОГОВ ДЕЙСТВИЙ ПОЛЬЗОВАТЕЛЕЙ
--- (СООТВЕТСТВУЕТ db.log_user_action / handlers.log_user_action)
--- =========================
-CREATE TABLE IF NOT EXISTS user_actions (
-    id          SERIAL PRIMARY KEY,
-    user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    telegram_id BIGINT NOT NULL,
-    action      VARCHAR(255) NOT NULL,
-    details     TEXT,
-    created_at  TIMESTAMP NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_user_actions_user_id
-    ON user_actions (user_id);
-
-CREATE INDEX IF NOT EXISTS idx_user_actions_created_at
-    ON user_actions (created_at);
+-- Индексы для оптимизации запросов
+CREATE INDEX IF NOT EXISTS idx_schedule_group_date ON schedule(group_id, lesson_date);
+CREATE INDEX IF NOT EXISTS idx_schedule_teacher ON schedule(teacher_id, lesson_date);
+CREATE INDEX IF NOT EXISTS idx_schedule_room ON schedule(room_id, lesson_date);
+CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id);
+CREATE INDEX IF NOT EXISTS idx_user_actions_log_user_id ON user_actions_log(user_id);
 """
 
-# =========================
-# НАЧАЛЬНОЕ ЗАПОЛНЕНИЕ ВРЕМЕНИ ПАР
-# =========================
+# SQL для начального заполнения таблицы времени пар
 INSERT_LESSON_TIMES_SQL = """
-INSERT INTO lessons_time (lesson_number, start_time, end_time) VALUES
+INSERT INTO lesson_times (lesson_number, start_time, end_time) VALUES
 (1, '09:00', '10:30'),
 (2, '10:40', '12:10'),
 (3, '12:40', '14:10'),
@@ -181,18 +143,16 @@ INSERT INTO lessons_time (lesson_number, start_time, end_time) VALUES
 ON CONFLICT (lesson_number) DO NOTHING;
 """
 
-# =========================
-# ТЕСТОВЫЕ ДАННЫЕ
-# =========================
+# SQL для добавления тестовых данных
 INSERT_TEST_DATA_SQL = """
--- Корпуса
-INSERT INTO buildings (building_name, address) VALUES
+-- Добавление корпусов
+INSERT INTO buildings (name, address) VALUES
 ('Главный корпус', 'ул. Ленина, д. 1'),
 ('Второй корпус', 'ул. Пушкина, д. 10'),
 ('Третий корпус', 'пр. Победы, д. 25')
 ON CONFLICT DO NOTHING;
 
--- Аудитории
+-- Добавление кабинетов
 INSERT INTO rooms (building_id, room_number, capacity, room_type) VALUES
 (1, '101', 30, 'лекционная'),
 (1, '102', 25, 'практическая'),
@@ -202,21 +162,27 @@ INSERT INTO rooms (building_id, room_number, capacity, room_type) VALUES
 (3, '401', 40, 'лекционная')
 ON CONFLICT DO NOTHING;
 
--- Группы
-INSERT INTO groups (group_number, faculty_name, course, students_count) VALUES
-('ИВТ-21', 'Факультет информационных технологий', 4, 25),
-('ИВТ-22', 'Факультет информационных технологий', 4, 28),
-('ЭК-31', 'Экономический факультет', 2, 30)
-ON CONFLICT (group_number) DO NOTHING;
+-- Добавление факультетов
+INSERT INTO faculties (name, short_name, dean_fio) VALUES
+('Факультет информационных технологий', 'ФИТ', 'Иванов И.И.'),
+('Экономический факультет', 'ЭФ', 'Петрова П.П.')
+ON CONFLICT DO NOTHING;
 
--- Преподаватели
+-- Добавление групп
+INSERT INTO student_groups (faculty_id, group_number, course, students_count) VALUES
+(1, 'ИВТ-21', 4, 25),
+(1, 'ИВТ-22', 4, 28),
+(2, 'ЭК-31', 2, 30)
+ON CONFLICT DO NOTHING;
+
+-- Добавление преподавателей
 INSERT INTO teachers (fio, department, position, email) VALUES
 ('Смирнов Алексей Петрович', 'Кафедра информатики', 'Доцент', 'smirnov@university.ru'),
 ('Козлова Мария Ивановна', 'Кафедра программирования', 'Профессор', 'kozlova@university.ru'),
 ('Новиков Дмитрий Сергеевич', 'Кафедра экономики', 'Старший преподаватель', 'novikov@university.ru')
 ON CONFLICT DO NOTHING;
 
--- Предметы (опционально)
+-- Добавление предметов
 INSERT INTO subjects (name, short_name, subject_type, hours_total) VALUES
 ('Базы данных', 'БД', 'лекция', 72),
 ('Базы данных (практика)', 'БД (пр)', 'практика', 36),
