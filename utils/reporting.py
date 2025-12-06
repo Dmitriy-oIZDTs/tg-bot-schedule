@@ -1,5 +1,3 @@
-# utils/reporting.py
-
 import csv
 import os
 from datetime import datetime
@@ -41,3 +39,4 @@ def export_user_actions_to_csv(actions, filename=None):
             ])
 
     return filename
+
