@@ -17,6 +17,11 @@ from aiogram.types import (
     FSInputFile,
 )
 
+from aiogram import F, Router
+from aiogram.types import ErrorEvent
+
+router = Router()
+
 from config.settings import BOT_TOKEN
 from database.db_manager import DatabaseManager
 from utils.reporting import export_user_actions_to_csv
@@ -288,38 +293,80 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
-    """Обработка команды /help"""
+    user = db.get_user_by_telegram_id(message.from_user.id)
+    role = user.get("role", "user") if user else "user"
+
     help_text = """
 📖 <b>Справка по боту расписания</b>
 
 <b>Основные команды:</b>
-/start - Начать работу с ботом
-/help - Показать эту справку
-/settings - Настройки бота
-/about - Информация о боте и авторе
-/group [номер] - Посмотреть расписание группы
-/teacher [ФИО] - Найти преподавателя
-/room [ауд.] - Посмотреть занятость аудитории
-/logs [дней] - (админ) Выгрузка отчета о действиях
-/setrole &lt;tg_id&gt; &lt;role&gt; - (dev) Назначить роль пользователю
-/cancel - Отмена текущего действия
-
-<b>Как пользоваться:</b>
-1️⃣ При первом запуске выберите свою группу через /start
-2️⃣ Нажмите "📅 Мое расписание" для просмотра
-3️⃣ Выберите день недели или всю неделю
-4️⃣ Можно выбрать неделю по номеру (с 1 сентября)
-5️⃣ Используйте /settings для изменения личных настроек
-
-<b>Поиск:</b>
-🔍 Поиск по группе - расписание любой группы
-👨‍🏫 Поиск по преподавателю - где и когда пары
-🚪 Поиск по аудитории - занятость кабинета
-
-<b>Автор:</b> Романов Дмитрий Владимирович
-<b>Группа:</b> o.ИЗДтс 23.2/Б1-22
+/start – Начать работу с ботом
+/help – Показать эту справку
+/settings – Настройки
+/group [номер] – Расписание группы
+/teacher [ФИО] – Расписание преподавателя
+/room [ауд.] – Занятость аудитории
+/cancel – Отмена действия
 """
-    await message.answer(help_text, parse_mode='HTML')
+
+    # Команды администратора
+    if role in ("admin", "developer"):
+        help_text += """
+<b>Команды администратора:</b>
+/logs [дней] – Отчёт действий пользователей
+"""
+
+    # Команды разработчика
+    if role == "developer":
+        help_text += """
+<b>Команды разработчика:</b>
+/setrole &lt;tg_id&gt; &lt;role&gt; – Назначить роль пользователю
+/users – Список всех пользователей
+"""
+
+    help_text += """
+<b>Как пользоваться:</b>
+1️⃣ Установите группу через /start  
+2️⃣ Используйте кнопки для просмотра расписания  
+3️⃣ В /settings можно менять формат времени и вид показа
+"""
+
+    await message.answer(help_text, parse_mode="HTML")
+
+
+@dp.message(Command("users"))
+async def cmd_users(message: types.Message):
+    """
+    /users — список всех пользователей в боте
+    Только для разработчика.
+    """
+    user = db.get_user_by_telegram_id(message.from_user.id)
+
+    if not is_developer(user):
+        await message.answer("❌ Команда доступна только разработчику.")
+        return
+
+    users = db.execute_query("""
+        SELECT id, telegram_id, username, role, group_id
+        FROM users
+        ORDER BY id
+    """, fetch=True)
+
+    if not users:
+        await message.answer("В боте пока нет пользователей.")
+        return
+
+    text = "<b>👥 Пользователи бота:</b>\n\n"
+
+    for u in users:
+        text += (
+            f"🆔 <b>{u['telegram_id']}</b>\n"
+            f"Роль: {u['role']}\n"
+            f"Имя: @{u['username']}\n"
+            f"Группа ID: {u['group_id']}\n\n"
+        )
+
+    await message.answer(text, parse_mode="HTML")
 
 
 @dp.message(F.text == "❓ Помощь")
@@ -1473,6 +1520,8 @@ async def room_back_to_days(callback: types.CallbackQuery):
 
 # ============== НАСТРОЙКИ /settings ==============
 
+from config.roles import ROLE_TITLES
+
 @dp.message(Command("settings"))
 async def cmd_settings(message: types.Message):
     """Настройки бота"""
@@ -1487,12 +1536,22 @@ async def cmd_settings(message: types.Message):
         logger.error(f"Не удалось получить настройки пользователя: {e}")
         settings = {}
 
-    await message.answer(
+    # Получаем роль пользователя
+    role_code = user.get("role", "user")
+    role_title = ROLE_TITLES.get(role_code, "👤 Пользователь")
+
+    text = (
         "⚙️ <b>Настройки бота</b>\n\n"
-        "Выберите пункт меню для изменения:",
+        f"👤 <b>Ваша роль:</b> {role_title}\n\n"
+        "Выберите пункт меню для изменения:"
+    )
+
+    await message.answer(
+        text,
         reply_markup=get_settings_keyboard(settings),
         parse_mode="HTML",
     )
+
 
 
 @dp.callback_query(F.data == "settings_time_format")
@@ -1641,15 +1700,16 @@ async def cmd_setrole(message: types.Message):
 
 # ============== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК ==============
 
-@dp.error()
-async def error_handler(event, exception):
-    """
-    Глобальный обработчик ошибок aiogram 3.x
-    """
-    logger.error(f"Ошибка при обработке события: {exception}", exc_info=True)
-    
-    # Игнорируем ошибку "message is not modified"
-    if "message is not modified" in str(exception):
-        return True
-    
-    return True
+
+@router.error()
+async def global_error_handler(event: ErrorEvent):
+    logger.error(f"❗ Ошибка: {event.exception}", exc_info=True)
+
+    # Игнорируем "message is not modified"
+    if "message is not modified" in str(event.exception):
+        return
+
+    try:
+        await event.update.message.answer("⚠️ Произошла ошибка. Мы уже работаем над этим.")
+    except:
+        pass
