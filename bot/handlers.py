@@ -4,6 +4,7 @@
 
 from datetime import datetime, timedelta
 import logging
+import os
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -16,6 +17,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     FSInputFile,
 )
+from aiogram.exceptions import TelegramBadRequest
 
 from aiogram import F, Router
 from aiogram.types import ErrorEvent
@@ -24,7 +26,13 @@ router = Router()
 
 from config.settings import BOT_TOKEN
 from database.db_manager import DatabaseManager
-from utils.reporting import export_user_actions_to_csv
+from utils.reporting import (
+    export_user_actions_to_csv, 
+    export_user_actions_to_excel, 
+    export_schedule_to_excel,
+    create_schedule_import_template,
+    import_schedule_from_excel
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +42,56 @@ dp = Dispatcher()
 
 # Инициализация базы данных
 db = DatabaseManager()
+
+
+# ============== ОБРАБОТЧИК ОШИБОК ==============
+
+@dp.error()
+async def error_handler(*args, **kwargs):
+    """
+    Глобальный обработчик ошибок.
+    Поддерживает гибкую сигнатуру — извлекает исключение из позиционных
+    или именованных аргументов, чтобы избежать TypeError при вызове
+    из разных версий aiogram.
+    """
+    # Попытка извлечь исключение
+    exception = kwargs.get('exception')
+    if exception is None:
+        for a in args:
+            if isinstance(a, Exception):
+                exception = a
+                break
+
+    if exception is None:
+        logger.error("Не удалось извлечь объект исключения в error_handler")
+        return
+
+    if isinstance(exception, TelegramBadRequest):
+        if "message is not modified" in str(exception).lower():
+            # Это безопасная ошибка - просто игнорируем
+            logger.debug("Игнорируемая ошибка: сообщение не изменилось")
+            return
+
+    # Для других ошибок логируем стек
+    logger.exception(f"Необработанная ошибка: {exception}")
+
+
+# ============== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==============
+
+async def safe_edit_text(message, text, **kwargs):
+    """
+    Безопасное редактирование текста сообщения с обработкой ошибки
+    'message is not modified'. Игнорирует ошибку если содержимое не изменилось.
+    """
+    try:
+        await message.edit_text(text, **kwargs)
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            logger.error(f"Ошибка при редактировании сообщения: {e}")
+    except Exception as e:
+        # Игнорируем ошибку если текст не изменился
+        if "message is not modified" not in str(e).lower():
+            logger.error(f"Ошибка при редактировании сообщения: {e}")
 
 
 # ============== СОСТОЯНИЯ ==============
@@ -309,11 +367,22 @@ async def cmd_help(message: types.Message):
 /cancel – Отмена действия
 """
 
+    # Команды для экспорта (доступны всем пользователям)
+    help_text += """
+<b>Экспорт:</b>
+/export_schedule [группа] [дней] – Расписание в Excel
+"""
+
     # Команды администратора
     if role in ("admin", "developer"):
         help_text += """
 <b>Команды администратора:</b>
-/logs [дней] – Отчёт действий пользователей
+/export_all_schedule [дней] – Расписание всех групп в Excel
+/export_logs [дней] [формат] – Логи в Excel/CSV
+/get_template – Получить шаблон для импорта расписания
+/import_schedule – Загрузить расписание из файла
+/clear_schedule [группа] [дата_от] [дата_до] – Удалить расписание
+/logs [дней] – Отчёт действий пользователей (CSV)
 """
 
     # Команды разработчика
@@ -332,6 +401,39 @@ async def cmd_help(message: types.Message):
 """
 
     await message.answer(help_text, parse_mode="HTML")
+
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    """Отмена текущей операции"""
+    current_state = await state.get_state()
+    
+    if current_state is None:
+        await message.answer(
+            "✅ Нет активных операций.\n\n"
+            "Используйте меню для навигации.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+    
+    # Передаем состояние пользователя для определения операции
+    state_to_operation = {
+        str(UserStates.waiting_for_group): "смены группы",
+        str(SearchStates.waiting_for_group_search): "поиска по группе",
+        str(SearchStates.waiting_for_teacher_search): "поиска по преподавателю",
+        str(SearchStates.waiting_for_room_search): "поиска по аудитории",
+        str(FileStates.waiting_for_schedule_file): "загрузки файла",
+    }
+    
+    operation = state_to_operation.get(str(current_state), "операции")
+    
+    await state.clear()
+    
+    await message.answer(
+        f"✅ Операция {operation} отменена.\n\n"
+        f"Возвращаемся в главное меню.",
+        reply_markup=get_main_keyboard()
+    )
 
 
 @dp.message(Command("users"))
@@ -432,15 +534,34 @@ async def process_group_selection(message: types.Message, state: FSMContext):
     """Обработка выбора группы"""
     group_number = message.text.strip().upper()
 
-    # Игнорируем кнопки меню
-    if group_number in [
-        '📅 МОЕ РАСПИСАНИЕ',
-        '🔍 ПОИСК ПО ГРУППЕ',
-        '👨‍🏫 ПОИСК ПО ПРЕПОДАВАТЕЛЮ',
-        '🚪 ПОИСК ПО АУДИТОРИИ',
-        '⚙️ СМЕНИТЬ ГРУППУ',
-        '❓ ПОМОЩЬ'
-    ]:
+    # Проверяем кнопки меню - они могут быть нажаты в любом регистре
+    menu_buttons = [
+        '📅 Мое расписание',
+        '🔍 Поиск по группе',
+        '👨‍🏫 Поиск по преподавателю',
+        '🚪 Поиск по аудитории',
+        '⚙️ Сменить группу',
+        '❓ Помощь'
+    ]
+    
+    # Сравниваем точный текст кнопки
+    if message.text in menu_buttons:
+        # Очищаем состояние и обрабатываем кнопку как обычная команда
+        await state.clear()
+        
+        # Обработка в зависимости от текста кнопки
+        if message.text == "📅 Мое расписание":
+            await show_my_schedule(message)
+        elif message.text == "🔍 Поиск по группе":
+            await search_group(message, state)
+        elif message.text == "👨‍🏫 Поиск по преподавателю":
+            await search_teacher(message, state)
+        elif message.text == "🚪 Поиск по аудитории":
+            await search_room(message, state)
+        elif message.text == "⚙️ Сменить группу":
+            await change_group(message, state)
+        elif message.text == "❓ Помощь":
+            await cmd_help(message)
         return
 
     groups = db.get_all_groups()
@@ -591,8 +712,6 @@ async def process_day_selection(callback: types.CallbackQuery):
 
     today = datetime.now()
     days_ahead = target_weekday - today.weekday()
-    if days_ahead < 0:
-        days_ahead += 7
 
     target_date = today + timedelta(days=days_ahead)
 
@@ -607,11 +726,12 @@ async def process_day_selection(callback: types.CallbackQuery):
             f"На этот день занятий нет 🎉"
         )
 
-    await callback.message.edit_text(
+    await safe_edit_text(callback.message,
         schedule_text,
         reply_markup=get_days_keyboard("my"),
         parse_mode='HTML'
     )
+    
     await callback.answer()
 
 
@@ -629,6 +749,23 @@ async def show_week_schedule(callback: types.CallbackQuery):
     today = datetime.now()
     # Понедельник текущей недели
     monday = today - timedelta(days=today.weekday())  # weekday: ПН=0
+    saturday = monday + timedelta(days=5)
+    
+    # ОПТИМИЗАЦИЯ: Получаем ВСЮ неделю одним запросом вместо 6
+    all_schedule = db.get_all_schedule_range(
+        monday.strftime('%Y-%m-%d'),
+        saturday.strftime('%Y-%m-%d'),
+        group_number=group_number
+    )
+    
+    # Группируем по датам для удобства
+    schedule_by_date = {}
+    for lesson in all_schedule:
+        date = lesson['lesson_date'].strftime('%Y-%m-%d') if hasattr(lesson['lesson_date'], 'strftime') else lesson['lesson_date']
+        if date not in schedule_by_date:
+            schedule_by_date[date] = []
+        schedule_by_date[date].append(lesson)
+    
     # Собираем текст
     week_schedule_text = f"📅 <b>Расписание группы {group_number}</b>\n"
     week_schedule_text += f"📆 Неделя с {monday.strftime('%d.%m.%Y')}\n\n"
@@ -642,8 +779,8 @@ async def show_week_schedule(callback: types.CallbackQuery):
 
         week_schedule_text += f"<b>{day_name} ({day.strftime('%d.%m')})</b>\n"
 
-        # БЕРЁМ РАСПИСАНИЕ НА КОНКРЕТНЫЙ ДЕНЬ
-        schedule = db.get_schedule_by_group(group_number, day_str)
+        # Используем уже полученное расписание
+        schedule = schedule_by_date.get(day_str, [])
 
         if schedule:
             for lesson in schedule:
@@ -661,7 +798,8 @@ async def show_week_schedule(callback: types.CallbackQuery):
 
         week_schedule_text += "\n"
 
-    await callback.message.edit_text(
+    await safe_edit_text(
+        callback.message,
         week_schedule_text,
         reply_markup=get_days_keyboard("my"),
         parse_mode='HTML'
@@ -673,7 +811,7 @@ async def show_week_schedule(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "select_week")
 async def show_week_selector(callback: types.CallbackQuery):
     """Показать выбор недели"""
-    await callback.message.edit_text(
+    await safe_edit_text(callback.message,
         "🔢 <b>Выберите номер недели</b>\n\n"
         "Отсчет идет с 1 сентября.\n"
         "✅ - текущая неделя",
@@ -699,17 +837,35 @@ async def show_week_by_number(callback: types.CallbackQuery):
     days_to_monday = (7 - september_1.weekday()) % 7
     first_monday = september_1 + timedelta(days=days_to_monday)
     target_monday = first_monday + timedelta(weeks=week_num - 1)
+    target_saturday = target_monday + timedelta(days=5)
 
     week_schedule_text = f"📅 <b>Расписание группы {user['group_number']}</b>\n"
     week_schedule_text += f"📆 Неделя {week_num} ({target_monday.strftime('%d.%m.%Y')})\n\n"
 
+    # ОПТИМИЗАЦИЯ: Получаем ВСЮ неделю одним запросом вместо 6
+    all_schedule = db.get_all_schedule_range(
+        target_monday.strftime('%Y-%m-%d'),
+        target_saturday.strftime('%Y-%m-%d'),
+        group_number=user['group_number']
+    )
+    
+    # Группируем по датам для удобства
+    schedule_by_date = {}
+    for lesson in all_schedule:
+        date = lesson['lesson_date'].strftime('%Y-%m-%d') if hasattr(lesson['lesson_date'], 'strftime') else lesson['lesson_date']
+        if date not in schedule_by_date:
+            schedule_by_date[date] = []
+        schedule_by_date[date].append(lesson)
+
     for i in range(6):  # ПН–СБ
         day = target_monday + timedelta(days=i)
-        schedule = db.get_schedule_by_group(user['group_number'], day.strftime('%Y-%m-%d'))
+        day_str = day.strftime('%Y-%m-%d')
 
         day_name = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'][i]
         week_schedule_text += f"<b>{day_name} ({day.strftime('%d.%m')})</b>\n"
 
+        schedule = schedule_by_date.get(day_str, [])
+        
         if schedule:
             for lesson in schedule:
                 week_schedule_text += (
@@ -725,7 +881,7 @@ async def show_week_by_number(callback: types.CallbackQuery):
 
         week_schedule_text += "\n"
 
-    await callback.message.edit_text(
+    await safe_edit_text(callback.message,
         week_schedule_text,
         reply_markup=get_week_selector_keyboard("my"),
         parse_mode='HTML'
@@ -755,7 +911,8 @@ async def back_to_days(callback: types.CallbackQuery):
             f"На сегодня занятий нет 🎉"
         )
 
-    await callback.message.edit_text(
+    await safe_edit_text(
+        callback.message,
         schedule_text,
         reply_markup=get_days_keyboard("my"),
         parse_mode='HTML'
@@ -830,21 +987,37 @@ async def process_group_search(message: types.Message, state: FSMContext):
     """Обработка поиска по группе (FSM)"""
     group_number = message.text.strip().upper()
 
-    if group_number in [
+    # Проверяем, не нажал ли пользователь на кнопку меню
+    menu_buttons = [
         '📅 МОЕ РАСПИСАНИЕ',
         '🔍 ПОИСК ПО ГРУППЕ',
         '👨‍🏫 ПОИСК ПО ПРЕПОДАВАТЕЛЮ',
         '🚪 ПОИСК ПО АУДИТОРИИ',
         '⚙️ СМЕНИТЬ ГРУППУ',
         '❓ ПОМОЩЬ'
-    ]:
+    ]
+    
+    if group_number in menu_buttons:
+        await message.answer(
+            "⚠️ Пожалуйста, введите <b>номер группы</b>, а не нажимайте кнопки меню.\n\n"
+            "Например: <code>ПМ-21</code> или <code>ИСП-32</code>",
+            parse_mode='HTML'
+        )
         return
 
     groups = db.get_all_groups()
     group = next((g for g in groups if g['group_number'].upper() == group_number), None)
 
     if not group:
-        await message.answer(f"❌ Группа '{group_number}' не найдена.")
+        # Показываем подсказку
+        groups_text = "\n".join([f"{g['group_number']}" for g in groups])
+        await message.answer(
+            f"❌ Группа '<code>{group_number}</code>' не найдена.\n\n"
+            f"<b>Доступные группы:</b>\n"
+            f"<code>{groups_text}</code>\n\n"
+            f"Попробуйте ещё раз или нажмите /cancel для отмены.",
+            parse_mode='HTML'
+        )
         return
 
     await state.clear()
@@ -882,8 +1055,6 @@ async def group_day_selection(callback: types.CallbackQuery):
 
     today = datetime.now()
     days_ahead = target_weekday - today.weekday()
-    if days_ahead < 0:
-        days_ahead += 7
 
     target_date = today + timedelta(days=days_ahead)
     schedule = db.get_schedule_by_group(group_number, target_date.strftime('%Y-%m-%d'))
@@ -897,7 +1068,8 @@ async def group_day_selection(callback: types.CallbackQuery):
             f"На этот день занятий нет."
         )
 
-    await callback.message.edit_text(
+    await safe_edit_text(
+        callback.message,
         schedule_text,
         reply_markup=get_days_keyboard("group", group_number),
         parse_mode='HTML'
@@ -912,11 +1084,27 @@ async def group_week_current(callback: types.CallbackQuery):
 
     today = datetime.now()
     monday = today - timedelta(days=today.weekday())  # Понедельник
+    saturday = monday + timedelta(days=5)
 
     week_schedule_text = f"📅 <b>Расписание группы {group_number}</b>\n"
     week_schedule_text += f"📆 Неделя с {monday.strftime('%d.%m.%Y')}\n\n"
 
     day_names = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота']
+
+    # ОПТИМИЗАЦИЯ: Получаем ВСЮ неделю одним запросом вместо 6
+    all_schedule = db.get_all_schedule_range(
+        monday.strftime('%Y-%m-%d'),
+        saturday.strftime('%Y-%m-%d'),
+        group_number=group_number
+    )
+    
+    # Группируем по датам для удобства
+    schedule_by_date = {}
+    for lesson in all_schedule:
+        date = lesson['lesson_date'].strftime('%Y-%m-%d') if hasattr(lesson['lesson_date'], 'strftime') else lesson['lesson_date']
+        if date not in schedule_by_date:
+            schedule_by_date[date] = []
+        schedule_by_date[date].append(lesson)
 
     for i in range(6):
         day = monday + timedelta(days=i)
@@ -925,8 +1113,8 @@ async def group_week_current(callback: types.CallbackQuery):
 
         week_schedule_text += f"<b>{day_name} ({day.strftime('%d.%m')})</b>\n"
 
-        # Берём расписание на КОНКРЕТНЫЙ день
-        schedule = db.get_schedule_by_group(group_number, day_str)
+        # Используем уже полученное расписание
+        schedule = schedule_by_date.get(day_str, [])
 
         if schedule:
             for lesson in schedule:
@@ -944,7 +1132,7 @@ async def group_week_current(callback: types.CallbackQuery):
 
         week_schedule_text += "\n"
 
-    await callback.message.edit_text(
+    await safe_edit_text(callback.message,
         week_schedule_text,
         reply_markup=get_days_keyboard("group", group_number),
         parse_mode='HTML'
@@ -958,7 +1146,7 @@ async def group_select_week(callback: types.CallbackQuery):
     """Показать селектор недель для группы"""
     group_number = '_'.join(callback.data.split('_')[3:])
 
-    await callback.message.edit_text(
+    await safe_edit_text(callback.message,
         "🔢 <b>Выберите номер недели</b>\n\n"
         "Отсчет идет с 1 сентября.\n"
         "✅ - текущая неделя",
@@ -980,17 +1168,35 @@ async def group_week_by_number(callback: types.CallbackQuery):
     days_to_monday = (7 - september_1.weekday()) % 7
     first_monday = september_1 + timedelta(days=days_to_monday)
     target_monday = first_monday + timedelta(weeks=week_num - 1)
+    target_saturday = target_monday + timedelta(days=5)
 
     week_schedule_text = f"📅 <b>Расписание группы {group_number}</b>\n"
     week_schedule_text += f"📆 Неделя {week_num} ({target_monday.strftime('%d.%m.%Y')})\n\n"
 
+    # ОПТИМИЗАЦИЯ: Получаем ВСЮ неделю одним запросом вместо 6
+    all_schedule = db.get_all_schedule_range(
+        target_monday.strftime('%Y-%m-%d'),
+        target_saturday.strftime('%Y-%m-%d'),
+        group_number=group_number
+    )
+    
+    # Группируем по датам для удобства
+    schedule_by_date = {}
+    for lesson in all_schedule:
+        date = lesson['lesson_date'].strftime('%Y-%m-%d') if hasattr(lesson['lesson_date'], 'strftime') else lesson['lesson_date']
+        if date not in schedule_by_date:
+            schedule_by_date[date] = []
+        schedule_by_date[date].append(lesson)
+
     for i in range(6):
         day = target_monday + timedelta(days=i)
-        schedule = db.get_schedule_by_group(group_number, day.strftime('%Y-%m-%d'))
+        day_str = day.strftime('%Y-%m-%d')
 
         day_name = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'][i]
         week_schedule_text += f"<b>{day_name} ({day.strftime('%d.%m')})</b>\n"
 
+        schedule = schedule_by_date.get(day_str, [])
+        
         if schedule:
             for lesson in schedule:
                 week_schedule_text += (
@@ -1006,7 +1212,7 @@ async def group_week_by_number(callback: types.CallbackQuery):
 
         week_schedule_text += "\n"
 
-    await callback.message.edit_text(
+    await safe_edit_text(callback.message,
         week_schedule_text,
         reply_markup=get_week_selector_keyboard("group", group_number),
         parse_mode='HTML'
@@ -1031,7 +1237,7 @@ async def group_back_to_days(callback: types.CallbackQuery):
             f"На сегодня занятий нет."
         )
 
-    await callback.message.edit_text(
+    await safe_edit_text(callback.message,
         schedule_text,
         reply_markup=get_days_keyboard("group", group_number),
         parse_mode='HTML'
@@ -1087,21 +1293,37 @@ async def process_teacher_search(message: types.Message, state: FSMContext):
     """Обработка поиска по преподавателю (FSM)"""
     teacher_name = message.text.strip()
 
-    if teacher_name.upper() in [
+    # Проверяем, не нажал ли пользователь на кнопку меню
+    menu_buttons = [
         '📅 МОЕ РАСПИСАНИЕ',
         '🔍 ПОИСК ПО ГРУППЕ',
         '👨‍🏫 ПОИСК ПО ПРЕПОДАВАТЕЛЮ',
         '🚪 ПОИСК ПО АУДИТОРИИ',
         '⚙️ СМЕНИТЬ ГРУППУ',
         '❓ ПОМОЩЬ'
-    ]:
+    ]
+    
+    if teacher_name.upper() in menu_buttons:
+        await message.answer(
+            "⚠️ Пожалуйста, введите <b>ФИО преподавателя</b>, а не нажимайте кнопки меню.\n\n"
+            "Например: <code>Иванов Иван Иванович</code>",
+            parse_mode='HTML'
+        )
         return
 
     teachers = db.get_all_teachers()
     teacher = next((t for t in teachers if teacher_name.lower() in t['fio'].lower()), None)
 
     if not teacher:
-        await message.answer(f"❌ Преподаватель '{teacher_name}' не найден.")
+        # Показываем подсказку
+        teachers_text = "\n".join([f"{t['fio']}" for t in teachers[:15]])
+        await message.answer(
+            f"❌ Преподаватель '<code>{teacher_name}</code>' не найден.\n\n"
+            f"<b>Попробуйте из списка (первые 15):</b>\n"
+            f"<code>{teachers_text}</code>\n\n"
+            f"Попытайтесь ещё раз или нажмите /cancel для отмены.",
+            parse_mode='HTML'
+        )
         return
 
     await state.clear()
@@ -1137,14 +1359,12 @@ async def teacher_day_selection(callback: types.CallbackQuery):
 
     today = datetime.now()
     days_ahead = target_weekday - today.weekday()
-    if days_ahead < 0:
-        days_ahead += 7
 
     target_date = today + timedelta(days=days_ahead)
     schedule = db.get_teacher_schedule(teacher_id, target_date.strftime('%Y-%m-%d'))
     text = format_teacher_schedule(teacher, schedule, target_date)
 
-    await callback.message.edit_text(
+    await safe_edit_text(callback.message,
         text,
         reply_markup=get_days_keyboard("teacher", teacher_id),
         parse_mode='HTML'
@@ -1166,6 +1386,22 @@ async def teacher_week_current(callback: types.CallbackQuery):
     today = datetime.now()
     days_since_monday = today.weekday()
     monday = today - timedelta(days=days_since_monday)
+    saturday = monday + timedelta(days=5)
+
+    # ОПТИМИЗАЦИЯ: Получаем ВСЮ неделю одним запросом вместо 6
+    all_schedule = db.get_teacher_schedule_range(
+        teacher_id,
+        monday.strftime('%Y-%m-%d'),
+        saturday.strftime('%Y-%m-%d')
+    )
+    
+    # Группируем по датам для удобства
+    schedule_by_date = {}
+    for lesson in all_schedule:
+        date = lesson['lesson_date'].strftime('%Y-%m-%d') if hasattr(lesson['lesson_date'], 'strftime') else lesson['lesson_date']
+        if date not in schedule_by_date:
+            schedule_by_date[date] = []
+        schedule_by_date[date].append(lesson)
 
     # Собираем расписание на неделю
     week_schedule_text = f"👨‍🏫 <b>Расписание: {teacher['fio']}</b>\n"
@@ -1173,7 +1409,8 @@ async def teacher_week_current(callback: types.CallbackQuery):
 
     for i in range(6):
         day = monday + timedelta(days=i)
-        schedule = db.get_teacher_schedule(teacher_id, day.strftime('%Y-%m-%d'))
+        day_str = day.strftime('%Y-%m-%d')
+        schedule = schedule_by_date.get(day_str, [])
 
         day_name = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'][i]
         week_schedule_text += f"<b>{day_name} ({day.strftime('%d.%m')})</b>\n"
@@ -1192,7 +1429,7 @@ async def teacher_week_current(callback: types.CallbackQuery):
 
         week_schedule_text += "\n"
 
-    await callback.message.edit_text(
+    await safe_edit_text(callback.message,
         week_schedule_text,
         reply_markup=get_days_keyboard("teacher", teacher_id),
         parse_mode='HTML'
@@ -1205,7 +1442,7 @@ async def teacher_select_week(callback: types.CallbackQuery):
     """Показать селектор недель для преподавателя"""
     teacher_id = int(callback.data.split('_')[3])
 
-    await callback.message.edit_text(
+    await safe_edit_text(callback.message,
         "🔢 <b>Выберите номер недели</b>\n\n"
         "Отсчет идет с 1 сентября.\n"
         "✅ - текущая неделя",
@@ -1233,13 +1470,30 @@ async def teacher_week_by_number(callback: types.CallbackQuery):
     days_to_monday = (7 - september_1.weekday()) % 7
     first_monday = september_1 + timedelta(days=days_to_monday)
     target_monday = first_monday + timedelta(weeks=week_num - 1)
+    target_saturday = target_monday + timedelta(days=5)
 
     week_schedule_text = f"👨‍🏫 <b>Расписание: {teacher['fio']}</b>\n"
     week_schedule_text += f"📆 Неделя {week_num} ({target_monday.strftime('%d.%m.%Y')})\n\n"
 
+    # ОПТИМИЗАЦИЯ: Получаем ВСЮ неделю одним запросом вместо 6
+    all_schedule = db.get_teacher_schedule_range(
+        teacher_id,
+        target_monday.strftime('%Y-%m-%d'),
+        target_saturday.strftime('%Y-%m-%d')
+    )
+    
+    # Группируем по датам для удобства
+    schedule_by_date = {}
+    for lesson in all_schedule:
+        date = lesson['lesson_date'].strftime('%Y-%m-%d') if hasattr(lesson['lesson_date'], 'strftime') else lesson['lesson_date']
+        if date not in schedule_by_date:
+            schedule_by_date[date] = []
+        schedule_by_date[date].append(lesson)
+
     for i in range(6):
         day = target_monday + timedelta(days=i)
-        schedule = db.get_teacher_schedule(teacher_id, day.strftime('%Y-%m-%d'))
+        day_str = day.strftime('%Y-%m-%d')
+        schedule = schedule_by_date.get(day_str, [])
 
         day_name = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'][i]
         week_schedule_text += f"<b>{day_name} ({day.strftime('%d.%m')})</b>\n"
@@ -1258,7 +1512,7 @@ async def teacher_week_by_number(callback: types.CallbackQuery):
 
         week_schedule_text += "\n"
 
-    await callback.message.edit_text(
+    await safe_edit_text(callback.message,
         week_schedule_text,
         reply_markup=get_week_selector_keyboard("teacher", teacher_id),
         parse_mode='HTML'
@@ -1281,7 +1535,7 @@ async def teacher_back_to_days(callback: types.CallbackQuery):
     schedule = db.get_teacher_schedule(teacher_id, today.strftime('%Y-%m-%d'))
     text = format_teacher_schedule(teacher, schedule, today)
 
-    await callback.message.edit_text(
+    await safe_edit_text(callback.message,
         text,
         reply_markup=get_days_keyboard("teacher", teacher_id),
         parse_mode='HTML'
@@ -1295,9 +1549,24 @@ async def teacher_back_to_days(callback: types.CallbackQuery):
 @dp.message(Command("room"))
 async def search_room(message: types.Message, state: FSMContext):
     """Поиск по аудитории"""
+    # Получаем список кабинетов для примеров.
+    try:
+        rows = db.execute_query("SELECT room_number FROM rooms ORDER BY room_number", fetch=True)
+        room_numbers = [r['room_number'] for r in rows if r.get('room_number')]
+    except Exception:
+        room_numbers = []
+
+    max_examples = 12
+    if not room_numbers:
+        examples_text = "101, 201А"
+    elif len(room_numbers) <= max_examples:
+        examples_text = ", ".join(room_numbers)
+    else:
+        examples_text = ", ".join(room_numbers[:max_examples]) + ", и др."
+
     await message.answer(
         f"🚪 <b>Поиск по аудитории</b>\n\n"
-        f"Введите номер аудитории (например: 101, 201А):",
+        f"Введите номер аудитории (например: {examples_text}):",
         parse_mode='HTML'
     )
     await state.set_state(SearchStates.waiting_for_room_search)
@@ -1308,14 +1577,22 @@ async def process_room_search(message: types.Message, state: FSMContext):
     """Обработка поиска по аудитории"""
     room_number = message.text.strip()
 
-    if room_number.upper() in [
+    # Проверяем, не нажал ли пользователь на кнопку меню
+    menu_buttons = [
         '📅 МОЕ РАСПИСАНИЕ',
         '🔍 ПОИСК ПО ГРУППЕ',
         '👨‍🏫 ПОИСК ПО ПРЕПОДАВАТЕЛЮ',
         '🚪 ПОИСК ПО АУДИТОРИИ',
         '⚙️ СМЕНИТЬ ГРУППУ',
         '❓ ПОМОЩЬ'
-    ]:
+    ]
+    
+    if room_number.upper() in menu_buttons:
+        await message.answer(
+            "⚠️ Пожалуйста, введите <b>номер аудитории</b>, а не нажимайте кнопки меню.\n\n"
+            "Например: <code>101</code>, <code>201А</code> или <code>305</code>",
+            parse_mode='HTML'
+        )
         return
 
     query = "SELECT id, building_id, room_number FROM rooms WHERE room_number ILIKE %s"
@@ -1323,7 +1600,19 @@ async def process_room_search(message: types.Message, state: FSMContext):
     room = result[0] if result else None
 
     if not room:
-        await message.answer(f"❌ Аудитория '{room_number}' не найдена.")
+        # Показываем подсказку
+        try:
+            rooms = db.execute_query("SELECT room_number FROM rooms ORDER BY room_number LIMIT 12", fetch=True)
+            examples_text = ", ".join([r['room_number'] for r in rooms if r.get('room_number')])
+        except:
+            examples_text = "101, 201А, 305"
+        
+        await message.answer(
+            f"❌ Аудитория '<code>{room_number}</code>' не найдена.\n\n"
+            f"<b>Примеры аудиторий:</b> {examples_text}\n\n"
+            f"Попробуйте ещё раз или нажмите /cancel для отмены.",
+            parse_mode='HTML'
+        )
         return
 
     await state.clear()
@@ -1361,14 +1650,12 @@ async def room_day_selection(callback: types.CallbackQuery):
 
     today = datetime.now()
     days_ahead = target_weekday - today.weekday()
-    if days_ahead < 0:
-        days_ahead += 7
 
     target_date = today + timedelta(days=days_ahead)
     schedule = db.get_room_schedule(room_id, target_date.strftime('%Y-%m-%d'))
     text = format_room_schedule(room, schedule, target_date)
 
-    await callback.message.edit_text(
+    await safe_edit_text(callback.message,
         text,
         reply_markup=get_days_keyboard("room", room_id),
         parse_mode='HTML'
@@ -1392,13 +1679,30 @@ async def room_week_current(callback: types.CallbackQuery):
     today = datetime.now()
     days_since_monday = today.weekday()
     monday = today - timedelta(days=days_since_monday)
+    saturday = monday + timedelta(days=5)
 
     week_schedule_text = f"🚪 <b>Аудитория {room['room_number']}</b>\n"
     week_schedule_text += f"📆 Неделя с {monday.strftime('%d.%m.%Y')}\n\n"
 
+    # ОПТИМИЗАЦИЯ: Получаем ВСЮ неделю одним запросом вместо 6
+    all_schedule = db.get_room_schedule_range(
+        room_id,
+        monday.strftime('%Y-%m-%d'),
+        saturday.strftime('%Y-%m-%d')
+    )
+    
+    # Группируем по датам для удобства
+    schedule_by_date = {}
+    for lesson in all_schedule:
+        date = lesson['lesson_date'].strftime('%Y-%m-%d') if hasattr(lesson['lesson_date'], 'strftime') else lesson['lesson_date']
+        if date not in schedule_by_date:
+            schedule_by_date[date] = []
+        schedule_by_date[date].append(lesson)
+
     for i in range(6):
         day = monday + timedelta(days=i)
-        schedule = db.get_room_schedule(room_id, day.strftime('%Y-%m-%d'))
+        day_str = day.strftime('%Y-%m-%d')
+        schedule = schedule_by_date.get(day_str, [])
 
         day_name = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'][i]
         week_schedule_text += f"<b>{day_name} ({day.strftime('%d.%m')})</b>\n"
@@ -1417,7 +1721,7 @@ async def room_week_current(callback: types.CallbackQuery):
 
         week_schedule_text += "\n"
 
-    await callback.message.edit_text(
+    await safe_edit_text(callback.message,
         week_schedule_text,
         reply_markup=get_days_keyboard("room", room_id),
         parse_mode='HTML'
@@ -1430,7 +1734,7 @@ async def room_select_week(callback: types.CallbackQuery):
     """Показать селектор недель для аудитории"""
     room_id = int(callback.data.split('_')[3])
 
-    await callback.message.edit_text(
+    await safe_edit_text(callback.message,
         "🔢 <b>Выберите номер недели</b>\n\n"
         "Отсчет идет с 1 сентября.\n"
         "✅ - текущая неделя",
@@ -1460,13 +1764,30 @@ async def room_week_by_number(callback: types.CallbackQuery):
     days_to_monday = (7 - september_1.weekday()) % 7
     first_monday = september_1 + timedelta(days=days_to_monday)
     target_monday = first_monday + timedelta(weeks=week_num - 1)
+    target_saturday = target_monday + timedelta(days=5)
 
     week_schedule_text = f"🚪 <b>Аудитория {room['room_number']}</b>\n"
     week_schedule_text += f"📆 Неделя {week_num} ({target_monday.strftime('%d.%m.%Y')})\n\n"
 
+    # ОПТИМИЗАЦИЯ: Получаем ВСЮ неделю одним запросом вместо 6
+    all_schedule = db.get_room_schedule_range(
+        room_id,
+        target_monday.strftime('%Y-%m-%d'),
+        target_saturday.strftime('%Y-%m-%d')
+    )
+    
+    # Группируем по датам для удобства
+    schedule_by_date = {}
+    for lesson in all_schedule:
+        date = lesson['lesson_date'].strftime('%Y-%m-%d') if hasattr(lesson['lesson_date'], 'strftime') else lesson['lesson_date']
+        if date not in schedule_by_date:
+            schedule_by_date[date] = []
+        schedule_by_date[date].append(lesson)
+
     for i in range(6):
         day = target_monday + timedelta(days=i)
-        schedule = db.get_room_schedule(room_id, day.strftime('%Y-%m-%d'))
+        day_str = day.strftime('%Y-%m-%d')
+        schedule = schedule_by_date.get(day_str, [])
 
         day_name = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'][i]
         week_schedule_text += f"<b>{day_name} ({day.strftime('%d.%m')})</b>\n"
@@ -1485,7 +1806,7 @@ async def room_week_by_number(callback: types.CallbackQuery):
 
         week_schedule_text += "\n"
 
-    await callback.message.edit_text(
+    await safe_edit_text(callback.message,
         week_schedule_text,
         reply_markup=get_week_selector_keyboard("room", room_id),
         parse_mode='HTML'
@@ -1510,7 +1831,7 @@ async def room_back_to_days(callback: types.CallbackQuery):
     schedule = db.get_room_schedule(room_id, today.strftime('%Y-%m-%d'))
     text = format_room_schedule(room, schedule, today)
 
-    await callback.message.edit_text(
+    await safe_edit_text(callback.message,
         text,
         reply_markup=get_days_keyboard("room", room_id),
         parse_mode='HTML'
@@ -1696,6 +2017,497 @@ async def cmd_setrole(message: types.Message):
 
     db.update_user_role(target_user["id"], new_role)
     await message.answer(f"✅ Роль пользователя {target_tg_id} изменена на: {new_role}")
+
+
+# ============== ЭКСПОРТ РАСПИСАНИЯ И ЛОГОВ В EXCEL ==============
+
+@dp.message(Command("export_schedule"))
+async def cmd_export_schedule(message: types.Message):
+    """
+    /export_schedule [номер_группы] [дней]
+    Экспорт расписания группы в Excel за последние N дней.
+    Если номер группы не указан, берется группа пользователя.
+    Если дней не указано, используется 30 дней.
+    """
+    user = db.get_user_by_telegram_id(message.from_user.id)
+    log_user_action(message.from_user.id, "export_schedule", message.text)
+    
+    parts = message.text.split(maxsplit=2)
+    
+    # Определяем группу
+    if len(parts) > 1:
+        group_number = parts[1].upper()
+    else:
+        if not user or not user.get('group_number'):
+            await message.answer("❌ Вы не выбрали группу. Используйте: /export_schedule [номер_группы]")
+            return
+        group_number = user['group_number']
+    
+    # Определяем количество дней
+    days = 30
+    if len(parts) > 2:
+        try:
+            days = int(parts[2])
+        except ValueError:
+            await message.answer("⚠️ Количество дней должно быть числом. Используется 30 дней.")
+    
+    # Получаем расписание
+    try:
+        from datetime import datetime, timedelta
+        today = datetime.now()
+        date_from = today - timedelta(days=days)
+        
+        schedule_data = db.get_schedule_by_group_range(group_number, date_from.date(), today.date())
+        
+        if not schedule_data:
+            await message.answer(f"❌ На группу {group_number} расписание не найдено.")
+            return
+        
+        # Экспортируем в Excel
+        await message.answer(f"⏳ Подготавливаю расписание группы {group_number}...")
+        filename = export_schedule_to_excel(schedule_data, group_name=group_number)
+        
+        doc = FSInputFile(filename)
+        await message.answer_document(
+            document=doc,
+            caption=f"📅 Расписание группы {group_number}\n"
+                   f"Период: последние {days} дней\n"
+                   f"Занятий: {len(schedule_data)} шт."
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при экспорте расписания: {e}")
+        await message.answer(f"❌ Ошибка при подготовке расписания: {str(e)}")
+
+
+@dp.message(Command("export_all_schedule"))
+async def cmd_export_all_schedule(message: types.Message):
+    """
+    /export_all_schedule [дней]
+    Экспорт расписания всех групп в Excel за последние N дней.
+    Доступно только администраторам.
+    """
+    user = db.get_user_by_telegram_id(message.from_user.id)
+    
+    if not is_admin(user):
+        await message.answer("❌ Команда доступна только администратору.")
+        return
+    
+    log_user_action(message.from_user.id, "export_all_schedule", message.text)
+    
+    # Определяем количество дней
+    parts = message.text.split(maxsplit=1)
+    days = 30
+    if len(parts) > 1:
+        try:
+            days = int(parts[1])
+        except ValueError:
+            await message.answer("⚠️ Количество дней должно быть числом. Используется 30 дней.")
+    
+    try:
+        from datetime import datetime, timedelta
+        today = datetime.now()
+        date_from = today - timedelta(days=days)
+        
+        await message.answer(f"⏳ Подготавливаю расписание всех групп за последние {days} дней...")
+        
+        schedule_data = db.get_all_schedule_range(date_from.date(), today.date())
+        
+        if not schedule_data:
+            await message.answer("❌ Расписание не найдено.")
+            return
+        
+        # Экспортируем в Excel
+        filename = export_schedule_to_excel(schedule_data, group_name="все_группы")
+        
+        doc = FSInputFile(filename)
+        await message.answer_document(
+            document=doc,
+            caption=f"📅 Расписание всех групп\n"
+                   f"Период: последние {days} дней\n"
+                   f"Всего занятий: {len(schedule_data)} шт."
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при экспорте расписания: {e}")
+        await message.answer(f"❌ Ошибка при подготовке расписания: {str(e)}")
+
+
+@dp.message(Command("export_logs"))
+async def cmd_export_logs(message: types.Message):
+    """
+    /export_logs [дней] [формат]
+    Экспорт логов действий пользователей в Excel или CSV.
+    Формат: excel или csv (по умолчанию csv)
+    Доступно только администратору.
+    """
+    user = db.get_user_by_telegram_id(message.from_user.id)
+    
+    if not is_admin(user):
+        await message.answer("❌ У вас нет прав для просмотра логов.")
+        return
+    
+    log_user_action(message.from_user.id, "export_logs", message.text)
+    
+    parts = message.text.split(maxsplit=2)
+    days = 1
+    file_format = "csv"
+    
+    if len(parts) > 1:
+        try:
+            days = int(parts[1])
+        except ValueError:
+            await message.answer("⚠️ Использование: /export_logs [дней] [формат]\nФормат: excel или csv")
+            return
+    
+    if len(parts) > 2:
+        file_format = parts[2].lower()
+        if file_format not in ("excel", "xlsx", "csv"):
+            await message.answer("⚠️ Формат должен быть: excel, xlsx или csv")
+            return
+    
+    # Нормализуем формат
+    if file_format in ("excel", "xlsx"):
+        file_format = "excel"
+    
+    try:
+        actions = db.get_user_actions(last_days=days)
+        
+        if not actions:
+            await message.answer("За указанный период действий не найдено.")
+            return
+        
+        if file_format == "excel":
+            await message.answer(f"⏳ Подготавливаю логи за последние {days} дн. в формате Excel...")
+            filename = export_user_actions_to_excel(actions)
+        else:
+            await message.answer(f"⏳ Подготавливаю логи за последние {days} дн. в формате CSV...")
+            filename = export_user_actions_to_csv(actions)
+        
+        doc = FSInputFile(filename)
+        await message.answer_document(
+            document=doc,
+            caption=f"📊 Логи действий пользователей\n"
+                   f"Период: последние {days} дн.\n"
+                   f"Записей: {len(actions)} шт.\n"
+                   f"Формат: {file_format.upper()}"
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при экспорте логов: {e}")
+        await message.answer(f"❌ Ошибка при подготовке логов: {str(e)}")
+
+
+# ============== ИМПОРТ РАСПИСАНИЯ ==============
+
+@dp.message(Command("schedule_stats"))
+async def cmd_schedule_stats(message: types.Message):
+    """
+    /schedule_stats
+    Показать статистику по расписанию в БД (для диагностики).
+    Доступно только разработчику.
+    """
+    user = db.get_user_by_telegram_id(message.from_user.id)
+    
+    if not is_developer(user):
+        await message.answer("❌ Команда доступна только разработчику.")
+        return
+    
+    try:
+        stats = db.get_schedule_stats()
+        
+        response = "📊 <b>Статистика расписания:</b>\n\n"
+        response += f"📝 Всего записей: {stats.get('total_records', 0)}\n"
+        response += f"📅 Уникальных дат: {stats.get('unique_dates', 0)}\n"
+        response += f"👥 Уникальных групп: {stats.get('unique_groups', 0)}\n"
+        response += f"📆 Первая дата: {stats.get('earliest_date', 'N/A')}\n"
+        response += f"📆 Последняя дата: {stats.get('latest_date', 'N/A')}\n"
+        
+        await message.answer(response, parse_mode="HTML")
+        log_user_action(message.from_user.id, "schedule_stats", "/schedule_stats")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении статистики: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
+
+
+@dp.message(Command("get_template"))
+async def cmd_get_template(message: types.Message):
+    """
+    /get_template
+    Получить шаблон Excel для импорта расписания.
+    Доступно только администраторам.
+    """
+    user = db.get_user_by_telegram_id(message.from_user.id)
+    
+    if not is_admin(user):
+        await message.answer("❌ Команда доступна только администратору.")
+        return
+    
+    log_user_action(message.from_user.id, "get_template", "/get_template")
+    
+    try:
+        await message.answer("⏳ Подготавливаю шаблон...")
+        
+        template_file = create_schedule_import_template()
+        doc = FSInputFile(template_file)
+        
+        await message.answer_document(
+            document=doc,
+            caption="📋 Шаблон для импорта расписания\n\n"
+                   "Инструкция:\n"
+                   "1️⃣ Заполните данные в Excel\n"
+                   "2️⃣ Сохраните файл\n"
+                   "3️⃣ Отправьте файл через /import_schedule\n\n"
+                   "Поля со звёздочкой (*) - обязательные"
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при создании шаблона: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
+
+
+@dp.message(Command("import_schedule"))
+async def cmd_import_schedule(message: types.Message, state: FSMContext):
+    """
+    /import_schedule
+    Загрузить расписание из Excel файла.
+    Доступно только администраторам.
+    """
+    user = db.get_user_by_telegram_id(message.from_user.id)
+    
+    if not is_admin(user):
+        await message.answer("❌ Команда доступна только администратору.")
+        return
+    
+    await message.answer(
+        "📤 Отправьте Excel файл с расписанием.\n\n"
+        "Используйте команду /get_template для получения шаблона."
+    )
+    await state.set_state(UserStates.waiting_for_file)
+
+
+class FileStates(StatesGroup):
+    """Состояния для загрузки файлов"""
+    waiting_for_schedule_file = State()
+
+
+# Переопределяем состояние
+class UserStates(StatesGroup):
+    """Состояния пользователя"""
+    waiting_for_group = State()
+    waiting_for_file = State()
+
+
+@dp.message(UserStates.waiting_for_file)
+async def process_schedule_import(message: types.Message, state: FSMContext):
+    """Обработка загруженного файла с расписанием"""
+    user = db.get_user_by_telegram_id(message.from_user.id)
+    # Дополнительная проверка прав на случай обхода: только админ/разработчик может загружать файл
+    if not is_admin(user):
+        await message.answer("❌ У вас нет прав для импорта расписания.")
+        await state.clear()
+        return
+    
+    if not message.document:
+        await message.answer("❌ Пожалуйста, отправьте файл Excel (.xlsx)")
+        return
+    
+    # Проверяем расширение файла
+    if not message.document.file_name.lower().endswith(('.xlsx', '.xls')):
+        await message.answer("❌ Поддерживаются только файлы Excel (.xlsx)")
+        return
+    
+    try:
+        await message.answer("⏳ Обрабатываю файл...")
+        
+        # Скачиваем файл
+        file_path = f"temp/{message.document.file_id}.xlsx"
+        os.makedirs("temp", exist_ok=True)
+        
+        file_info = await bot.get_file(message.document.file_id)
+        await bot.download_file(file_info.file_path, file_path)
+        
+        log_user_action(message.from_user.id, "import_schedule", f"Файл: {message.document.file_name}")
+        
+        # Импортируем расписание
+        result = import_schedule_from_excel(file_path, db)
+        
+        # Удаляем временный файл
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        
+        # Формируем ответ
+        response = f"✅ {result['message']}\n"
+        response += f"📝 Добавлено записей: {result['added']}\n"
+        
+        if result['errors']:
+            response += f"\n⚠️ Ошибок: {len(result['errors'])}\n"
+            response += "Детали ошибок:\n"
+            for error in result['errors'][:10]:  # Показываем первые 10 ошибок
+                response += f"• {error}\n"
+            if len(result['errors']) > 10:
+                response += f"... и ещё {len(result['errors']) - 10} ошибок\n"
+        
+        await message.answer(response)
+        
+    except Exception as e:
+        logger.error(f"Ошибка при импорте расписания: {e}")
+        await message.answer(f"❌ Ошибка при обработке файла: {str(e)}")
+    
+    finally:
+        await state.clear()
+
+
+@dp.message(Command("clear_schedule"))
+async def cmd_clear_schedule(message: types.Message):
+    """
+    /clear_schedule <группа> [от_даты] [до_даты]
+    Удалить расписание для группы.
+    Доступно только администраторам.
+    
+    Примеры:
+    /clear_schedule БПИ-24 - удалить всё расписание группы
+    /clear_schedule БПИ-24 2026-02-01 2026-02-28 - удалить за период
+    """
+    user = db.get_user_by_telegram_id(message.from_user.id)
+    
+    if not is_admin(user):
+        await message.answer("❌ Команда доступна только администратору.")
+        return
+    
+    parts = message.text.split(maxsplit=3)
+    
+    if len(parts) < 2:
+        await message.answer("⚠️ Использование: /clear_schedule <группа> [от_даты] [до_даты]")
+        return
+    
+    group_number = parts[1].upper()
+    date_from = None
+    date_to = None
+    
+    if len(parts) >= 4:
+        date_from = parts[2]
+        date_to = parts[3]
+    
+    try:
+        # Проверяем, существует ли группа
+        groups = db.execute_query(
+            "SELECT id FROM student_groups WHERE group_number = %s",
+            (group_number,), fetch=True
+        )
+        
+        if not groups:
+            await message.answer(f"❌ Группа '{group_number}' не найдена")
+            return
+        
+        # Удаляем расписание
+        db.delete_schedule_for_group(group_number, date_from, date_to)
+        
+        log_user_action(message.from_user.id, "clear_schedule", 
+                       f"Группа: {group_number}, дата_от: {date_from}, дата_до: {date_to}")
+        
+        if date_from and date_to:
+            await message.answer(
+                f"✅ Расписание группы {group_number}\n"
+                f"удалено за период {date_from} - {date_to}"
+            )
+        else:
+            await message.answer(
+                f"✅ Всё расписание группы {group_number} удалено"
+            )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при удалении расписания: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
+
+
+# ============== ОБРАБОТЧИК "ПОТЕРЯННЫХ" СООБЩЕНИЙ ==============
+
+@dp.message()
+async def lost_message_handler(message: types.Message, state: FSMContext):
+    """
+    Обработчик для перехвата сообщений, когда пользователь находится в FSM состоянии.
+    Эта функция срабатывает только если никакой другой обработчик не подошел.
+    """
+    current_state = await state.get_state()
+    
+    if current_state is None:
+        # Пользователь не в процессе выполнения команды, но сообщение не обработано
+        await message.answer(
+            "❓ Я не знаю эту команду.\n\n"
+            "Используйте /help для справки или нажмите кнопку в меню.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+    
+    # Определяем, какую операцию пользователь не закончил
+    state_to_operation = {
+        str(UserStates.waiting_for_group): "🔄 <b>Вы не закончили смену группы</b>",
+        str(SearchStates.waiting_for_group_search): "🔄 <b>Вы не закончили поиск по группе</b>",
+        str(SearchStates.waiting_for_teacher_search): "🔄 <b>Вы не закончили поиск по преподавателю</b>",
+        str(SearchStates.waiting_for_room_search): "🔄 <b>Вы не закончили поиск по аудитории</b>",
+        str(FileStates.waiting_for_schedule_file): "🔄 <b>Вы начали загрузку расписания</b>",
+    }
+    
+    operation_text = state_to_operation.get(str(current_state), "🔄 <b>Вы остались в процессе выполнения операции</b>")
+    
+    # Создаём клавиатуру для отмены операции
+    cancel_keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отменить операцию", callback_data="cancel_operation")],
+            [InlineKeyboardButton(text="📝 Помощь", callback_data="help_menu")],
+        ]
+    )
+    
+    await message.answer(
+        f"{operation_text}\n\n"
+        f"Пожалуйста, завершите её или отмените операцию.",
+        reply_markup=cancel_keyboard,
+        parse_mode='HTML'
+    )
+
+
+@dp.callback_query(F.data == "cancel_operation")
+async def cancel_operation(callback: types.CallbackQuery, state: FSMContext):
+    """Отмена текущей операции и возврат в меню"""
+    await state.clear()
+    
+    await safe_edit_text(
+        callback.message,
+        "✅ Операция отменена. Вы вернулись в главное меню.",
+        reply_markup=get_main_keyboard(),
+        parse_mode='HTML'
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "help_menu")
+async def show_help_from_callback(callback: types.CallbackQuery):
+    """Показать справку из callback"""
+    help_text = (
+        "📚 <b>СПРАВКА ПО КОМАНДАМ</b>\n\n"
+        "🕐 <b>Просмотр расписания:</b>\n"
+        "  • 📅 МОЕ РАСПИСАНИЕ - расписание вашей группы\n"
+        "  • 🔍 ПОИСК ПО ГРУППЕ - поиск по номеру группы\n"
+        "  • 👨‍🏫 ПОИСК ПО ПРЕПОДАВАТЕЛЮ - расписание преподавателя\n"
+        "  • 🚪 ПОИСК ПО АУДИТОРИИ - расписание аудитории\n\n"
+        "⚙️ <b>Настройки:</b>\n"
+        "  • ⚙️ СМЕНИТЬ ГРУППУ - изменить вашу группу\n\n"
+        "❓ Нажимайте кнопки в меню для навигации"
+    )
+    
+    await safe_edit_text(
+        callback.message,
+        help_text,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
+            ]
+        ),
+        parse_mode='HTML'
+    )
+    await callback.answer()
 
 
 # ============== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК ==============
